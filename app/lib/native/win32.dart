@@ -136,11 +136,6 @@ typedef _StretchBltD = int Function(
 final _StretchBltD _stretchBlt =
     _gdi32.lookupFunction<_StretchBltC, _StretchBltD>('StretchBlt');
 
-typedef _BitBltC = Int32 Function(
-    IntPtr, Int32, Int32, Int32, Int32, IntPtr, Int32, Int32, Uint32);
-typedef _BitBltD = int Function(int, int, int, int, int, int, int, int, int);
-final _BitBltD _bitBlt = _gdi32.lookupFunction<_BitBltC, _BitBltD>('BitBlt');
-
 typedef _GdiFlushC = Int32 Function();
 typedef _GdiFlushD = int Function();
 final _GdiFlushD _gdiFlush =
@@ -156,6 +151,11 @@ typedef _SetBrushOrgExC = Int32 Function(IntPtr, Int32, Int32, IntPtr);
 typedef _SetBrushOrgExD = int Function(int, int, int, int);
 final _SetBrushOrgExD _setBrushOrgEx =
     _gdi32.lookupFunction<_SetBrushOrgExC, _SetBrushOrgExD>('SetBrushOrgEx');
+
+typedef _BitBltC = Int32 Function(
+    IntPtr, Int32, Int32, Int32, Int32, IntPtr, Int32, Int32, Uint32);
+typedef _BitBltD = int Function(int, int, int, int, int, int, int, int, int);
+final _BitBltD _bitBlt = _gdi32.lookupFunction<_BitBltC, _BitBltD>('BitBlt');
 
 // ---- turbojpeg --------------------------------------------------------------
 typedef _TJInitCompressC = Pointer<Void> Function();

@@ -39,6 +39,13 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
 
+# The native media module is loaded at runtime; it accelerates the screen
+# capture when the system provides Windows Graphics Capture.
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "$<TARGET_FILE:orbitlink_encoder>"
+    "$<TARGET_FILE_DIR:${BINARY_NAME}>/orbitlink_encoder.dll")
+
 # libjpeg-turbo (TurboJPEG) powers the high frame rate screen encoder.
 set(TURBOJPEG_DLL "${CMAKE_CURRENT_SOURCE_DIR}/resources/turbojpeg.dll")
 add_custom_command(TARGET ${BINARY_NAME} POST_BUILD

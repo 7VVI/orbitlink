@@ -54,7 +54,8 @@
 
 ### 远控内核（真实可用）
 - 被控端注册到中继：9 位识别码 + 6 位验证码，心跳与自动重连。
-- GDI 采集主屏（原生分辨率，32 位 DIB 直读）→ **libjpeg-turbo（TurboJPEG）4:4:4 JPEG 编码**，后台 Isolate，不阻塞 UI。
+- GDI 采集主屏（原生分辨率，32 位 DIB 直读 + BitBlt，避免 HALFTONE 缩放）→ **libjpeg-turbo（TurboJPEG）4:4:4 JPEG 编码**，后台 Isolate，不阻塞 UI。
+- 另附原生采集加速模块 `app/windows/native/orbitlink_encoder`：优先使用 **Windows Graphics Capture**（D3D11 纹理直读），系统未安装“屏幕捕获”组件时自动回退到 GDI 采集。
 - WebSocket 二进制帧传输，支持流畅 / 高清 / 超清画质与 5–30 FPS（流畅 1280px/62%、高清 1920px/85%、超清 1920px/92%）。
 - 控制端通过 `SendInput` / `SetCursorPos` 注入鼠标移动、按键、滚轮与键盘。
 - 单向剪贴板同步、中文文本发送、截屏保存到 `图片\OrbitLink`。
@@ -293,6 +294,8 @@ OrbitLink/
 1. **中继模式，不是 P2P**：所有流量经中继转发，跨公网请部署 TLS 反向代理。
 2. **WebSocket 明文、验证码由中继校验**：仅建议用于可信环境；公网必须使用 WSS。
 3. **JPEG 画面链路**：4:4:4 MJPEG 最高约 30 FPS，依赖 CPU 编码（libjpeg-turbo）；无 H.264/AV1、无音频、无多屏切换；独占全屏/硬件覆盖层可能采集为黑屏。
+4. **H.264 编码待接入**：Media Foundation 的 H.264 **解码器已验证可用**，但硬件编码器要求异步 D3D11 设备管理器（MFCreateDXGI*SurfaceBuffer + 事件驱动 MFT）路径，尚未实现，因此当前仍走 MJPEG。
+5. **Windows Graphics Capture 需要系统组件**：未安装“屏幕捕获”可选功能时自动回退到 GDI 采集（本机 Win10 缺该组件，回退路径实测 25–30 FPS）。
 4. **部分会话工具仍是占位**：远程文件传输、文件闪传、语音聊天、隐私屏等尚未接入。
 5. **Windows UIPI**：普通权限进程无法向管理员权限窗口注入输入，需要以相同权限运行。
 6. **同机测试光标回环**：两端共享物理光标时会出现追尾与镜像，属于预期，请用两台设备体验。

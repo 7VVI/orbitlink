@@ -50,6 +50,7 @@ set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")
 add_subdirectory(${FLUTTER_MANAGED_DIR})
 
 # Application build; see runner/CMakeLists.txt.
+add_subdirectory("native")
 add_subdirectory("runner")
 
 # libjpeg-turbo (TurboJPEG) powers the high frame rate screen encoder.

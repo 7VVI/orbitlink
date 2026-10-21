@@ -368,6 +368,7 @@ class HostEngine {
       final frame = await worker.capture(
         maxWidth: _widthOverride ?? settings.maxWidth,
         quality: _qualityOverride ?? settings.jpegQuality,
+        fps: _fpsOverride ?? settings.fps,
       );
       if (frame == null) {
         final now = DateTime.now();
