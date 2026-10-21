@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">星轨远控</string>
+    <string name="accessibility_service_label">星轨输入服务</string>
+    <string name="accessibility_service_description">允许星轨远控在远程协助会话中执行点击、滑动、返回等操作。仅在你主动开启本机被控时使用。</string>
+</resources>

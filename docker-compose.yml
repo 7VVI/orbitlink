@@ -1,0 +1,27 @@
+services:
+  relay:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: orbitlink-relay:1.0.0
+    container_name: orbitlink-relay
+    restart: unless-stopped
+    init: true
+    ports:
+      - "7080:7080"
+    environment:
+      PORT: "7080"
+      BIND: "0.0.0.0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${PORT}/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
