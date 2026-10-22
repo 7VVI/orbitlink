@@ -314,6 +314,7 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
       case 'clipboard':
       case 'control':
       case 'stats':
+      case 'p2p':
         _forward(client, message);
         break;
       default:

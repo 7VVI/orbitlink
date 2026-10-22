@@ -36,45 +36,6 @@ typedef _SetCursorPosD = int Function(int, int);
 final _SetCursorPosD _setCursorPos =
     _user32.lookupFunction<_SetCursorPosC, _SetCursorPosD>('SetCursorPos');
 
-typedef _GetForegroundWindowC = IntPtr Function();
-typedef _GetForegroundWindowD = int Function();
-final _GetForegroundWindowD _getForegroundWindow =
-    _user32.lookupFunction<_GetForegroundWindowC, _GetForegroundWindowD>(
-        'GetForegroundWindow');
-
-typedef _GetWindowThreadProcessIdC = Uint32 Function(IntPtr, Pointer<Uint32>);
-typedef _GetWindowThreadProcessIdD = int Function(int, Pointer<Uint32>);
-final _GetWindowThreadProcessIdD _getWindowThreadProcessId = _user32
-    .lookupFunction<_GetWindowThreadProcessIdC, _GetWindowThreadProcessIdD>(
-        'GetWindowThreadProcessId');
-
-typedef _GetCurrentProcessIdC = Uint32 Function();
-typedef _GetCurrentProcessIdD = int Function();
-final _GetCurrentProcessIdD _getCurrentProcessId =
-    _kernel32.lookupFunction<_GetCurrentProcessIdC, _GetCurrentProcessIdD>(
-        'GetCurrentProcessId');
-
-final class WinRect extends Struct {
-  @Int32()
-  external int left;
-  @Int32()
-  external int top;
-  @Int32()
-  external int right;
-  @Int32()
-  external int bottom;
-}
-
-typedef _GetWindowRectC = Int32 Function(IntPtr, Pointer<WinRect>);
-typedef _GetWindowRectD = int Function(int, Pointer<WinRect>);
-final _GetWindowRectD _getWindowRect =
-    _user32.lookupFunction<_GetWindowRectC, _GetWindowRectD>('GetWindowRect');
-
-typedef _GetClientRectC = Int32 Function(IntPtr, Pointer<WinRect>);
-typedef _GetClientRectD = int Function(int, Pointer<WinRect>);
-final _GetClientRectD _getClientRect =
-    _user32.lookupFunction<_GetClientRectC, _GetClientRectD>('GetClientRect');
-
 // ---- gdi32 ------------------------------------------------------------------
 typedef _CreateCompatibleDcC = IntPtr Function(IntPtr);
 typedef _CreateCompatibleDcD = int Function(int);
@@ -363,9 +324,28 @@ class _TurboJPEGEncoder {
 }
 
 class CapturedFrame {
-  CapturedFrame(this.jpeg, this.width, this.height, this.timestampMs);
+  CapturedFrame(
+    this.bytes,
+    this.width,
+    this.height,
+    this.timestampMs, {
+    this.isH264 = false,
+    this.keyframe = false,
+  });
 
-  final Uint8List jpeg;
+  final Uint8List bytes;
+  final int width;
+  final int height;
+  final int timestampMs;
+  final bool isH264;
+  final bool keyframe;
+}
+
+/// A raw 32-bit BGRA frame whose pixels stay valid until the next capture.
+class BgraFrame {
+  BgraFrame(this.bits, this.width, this.height, this.timestampMs);
+
+  final Pointer<Uint8> bits;
   final int width;
   final int height;
   final int timestampMs;
@@ -382,10 +362,19 @@ class ScreenCapture {
   int _sourceWidth = 0;
   int _sourceHeight = 0;
   bool _disposed = false;
-  final _TurboJPEGEncoder? _encoder = _TurboJPEGEncoder.create();
+  _TurboJPEGEncoder? _encoder;
+  bool _encoderResolved = false;
+
+  _TurboJPEGEncoder? _jpegEncoder() {
+    if (!_encoderResolved) {
+      _encoderResolved = true;
+      _encoder = _TurboJPEGEncoder.create();
+    }
+    return _encoder;
+  }
 
   bool _ensureSession(int maxWidth) {
-    if (_disposed || _encoder == null) return false;
+    if (_disposed) return false;
     final sw = screenWidth;
     final sh = screenHeight;
     if (sw <= 0 || sh <= 0) return false;
@@ -395,6 +384,10 @@ class ScreenCapture {
       tw = maxWidth;
       th = (sh * maxWidth / sw).round();
     }
+    // NV12/H.264 requires even dimensions; GDI handles them just as well.
+    tw &= ~1;
+    th &= ~1;
+    if (tw < 2 || th < 2) return false;
     if (_screenDc != 0 &&
         _sourceWidth == sw &&
         _sourceHeight == sh &&
@@ -454,9 +447,8 @@ class ScreenCapture {
     _dibBitsAddress = 0;
   }
 
-  CapturedFrame? capture({int maxWidth = 1920, int quality = 85}) {
-    if (_disposed || _encoder == null) return null;
-    if (!_ensureSession(maxWidth)) return null;
+  bool _blit(int maxWidth) {
+    if (!_ensureSession(maxWidth)) return false;
     final sameSize =
         _targetWidth == _sourceWidth && _targetHeight == _sourceHeight;
     final copied = sameSize
@@ -484,14 +476,34 @@ class ScreenCapture {
             _sourceHeight,
             _srcCopy,
           );
-    if (copied == 0) return null;
+    if (copied == 0) return false;
     _gdiFlush();
+    return true;
+  }
+
+  /// Captures the screen into the reusable DIB and returns its BGRA pixels.
+  BgraFrame? captureBgra({int maxWidth = 1920}) {
+    if (_disposed) return null;
+    if (!_blit(maxWidth)) return null;
+    return BgraFrame(
+      Pointer<Uint8>.fromAddress(_dibBitsAddress),
+      _targetWidth,
+      _targetHeight,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  CapturedFrame? capture({int maxWidth = 1920, int quality = 85}) {
+    if (_disposed) return null;
+    final encoder = _jpegEncoder();
+    if (encoder == null) return null;
+    if (!_blit(maxWidth)) return null;
     final subsampling = quality >= 80
         ? _tjSamp444
         : quality >= 60
             ? _tjSamp422
             : _tjSamp420;
-    final jpeg = _encoder.compress(
+    final jpeg = encoder.compress(
       _dibBitsAddress,
       _targetWidth,
       _targetHeight,
@@ -512,6 +524,7 @@ class ScreenCapture {
     _disposed = true;
     _releaseSession();
     _encoder?.dispose();
+    _encoder = null;
   }
 }
 
@@ -697,40 +710,6 @@ class SystemInfo {
       }
     } catch (_) {
       macAddress = mac;
-    }
-  }
-}
-
-class WindowMetrics {
-  WindowMetrics._();
-
-  /// Width/height of the invisible native frame around the Flutter client
-  /// area. The design system is specified against a 1000x640 client.
-  static (int, int) clientPadding() {
-    try {
-      final hwnd = _getForegroundWindow();
-      if (hwnd == 0) return (0, 0);
-      final pid = calloc<Uint32>();
-      _getWindowThreadProcessId(hwnd, pid);
-      final ownPid = _getCurrentProcessId();
-      final isOwn = pid.value == ownPid;
-      calloc.free(pid);
-      if (!isOwn) return (0, 0);
-      final wr = calloc<WinRect>();
-      final cr = calloc<WinRect>();
-      final okW = _getWindowRect(hwnd, wr);
-      final okC = _getClientRect(hwnd, cr);
-      final padding = (okW == 0 || okC == 0)
-          ? (0, 0)
-          : (
-              (wr.ref.right - wr.ref.left) - (cr.ref.right - cr.ref.left),
-              (wr.ref.bottom - wr.ref.top) - (cr.ref.bottom - cr.ref.top),
-            );
-      calloc.free(wr);
-      calloc.free(cr);
-      return padding;
-    } catch (_) {
-      return (0, 0);
     }
   }
 }

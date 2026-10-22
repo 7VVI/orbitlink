@@ -37,6 +37,17 @@ namespace wgxd3d = ABI::Windows::Graphics::DirectX::Direct3D11;
 namespace wgdx = ABI::Windows::Graphics::DirectX;
 namespace wgx = ABI::Windows::Graphics;
 
+// WinRT activation and D3D interop require an initialized apartment on the
+// thread that creates the capture session. The worker thread lives for the
+// whole session, so the apartment deliberately stays initialized.
+bool EnsureApartment() {
+  static thread_local bool initialized = []() {
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    return SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
+  }();
+  return initialized;
+}
+
 // Interop interfaces are declared locally to avoid pulling in SDK headers
 // that clash with the WinRT ABI headers.
 struct __declspec(uuid("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356"))
@@ -514,6 +525,10 @@ class EncoderRuntime {
  public:
   int create(int width, int height, int fps, int quality) {
     stop();
+    if (!EnsureApartment()) {
+      message_ = "COM initialization failed";
+      return -4;
+    }
     width_ = width;
     height_ = height;
     fps_ = fps > 0 ? fps : 30;

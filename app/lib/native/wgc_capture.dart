@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'h264_codec.dart';
+
 /// Thin FFI wrapper around the native `orbitlink_encoder` module, which
 /// captures the primary monitor through Windows Graphics Capture and encodes
 /// the frames with libjpeg-turbo.
@@ -46,7 +48,8 @@ class NativeScreenEncoder {
     required int quality,
   }) {
     try {
-      final library = DynamicLibrary.open('orbitlink_encoder.dll');
+      final library = openOrbitMediaLibrary();
+      if (library == null) return null;
       final encoder = NativeScreenEncoder._(library);
       final status = encoder._create(width, height, fps, quality);
       if (status != 0) {

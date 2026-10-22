@@ -4,7 +4,7 @@
 
 **星轨远控**采用全新的浅色界面与「星轨」品牌视觉，使用 Material Icons 与自制品牌图形，不包含原版向日葵的图标字体、图片素材或品牌元素。启动即用，没有账号、登录、广告或推广位。
 
-- **Windows**：Flutter UI → `dart:ffi` 调用 Win32 GDI / TurboJPEG / SendInput，真实屏幕采集与键鼠注入。
+- **Windows**：Flutter UI → `dart:ffi` 调用 Win32 GDI / TurboJPEG / Media Foundation H.264 / SendInput，真实屏幕采集与键鼠注入。
 - **Android**：单个 APK 同时具备控制端与被控端，Kotlin `MediaProjection` + `AccessibilityService`。
 - **中继**：Dart 编写的轻量 WebSocket 服务器，支持 Windows 可执行文件与 Docker 部署。
 
@@ -44,23 +44,25 @@
 ## 功能
 
 ### 界面
-- **1120×720 浅色无边框窗口**：顶部导航、靛紫 `#5A55F2` + 青绿 `#0FB5A5` 双色系统、原创星轨标志；最小 1000×640。
-- **远程协助**：单列布局——顶部为本机识别码、验证码与允许协助开关；下方一行输入对方识别码和验证码并点击连接；最近一次连接信息会自动填入，最近设备以标签展示。
+- **1120×720 浅色无边框窗口**：顶部导航、靛紫 `#5A55F2` + 青绿 `#0FB5A5` 双色系统、原创星轨标志；最小 1000×640。窗口内容铺满整个窗口，无系统标题栏和左右白边，边缘保留 6 px 隐形拖拽缩放热区。
+- **远程协助**：单列布局——顶部为本机识别码、验证码与允许协助开关；下方一行输入对方识别码和验证码并点击连接；最近一次连接信息会自动填入，最近设备以标签展示。首页不显示中继连接状态。
 - **设备**：本机信息、最近设备网格/列表切换、添加设备、设备详情、删除记录。
 - **设置**：本机信息 / 连接设置 / 远程画面 / 安全验证 / 消息提醒五个分区，只展示实际生效的设置项。
 - **搜索与消息**：居中命令面板搜索本机与最近设备；右上角消息中心。
-- **会话窗口**：深色沉浸画布、悬浮工具栏、FPS/RTT、画质切换、文本发送、剪贴板同步、截屏、全屏、结束确认。
+- **会话窗口**：深色沉浸画布、悬浮工具栏、编码（H.264/JPEG）/FPS/RTT、画质切换、直接键盘输入、文本发送、剪贴板同步、截屏并复制、全屏、结束确认。
 - **无账号、无登录、无广告**；设备身份与访问记录只保存在本机。
 
 ### 远控内核（真实可用）
 - 被控端注册到中继：9 位识别码 + 6 位验证码，心跳与自动重连。
-- GDI 采集主屏（原生分辨率，32 位 DIB 直读 + BitBlt，避免 HALFTONE 缩放）→ **libjpeg-turbo（TurboJPEG）4:4:4 JPEG 编码**，后台 Isolate，不阻塞 UI。
-- 另附原生采集加速模块 `app/windows/native/orbitlink_encoder`：优先使用 **Windows Graphics Capture**（D3D11 纹理直读），系统未安装“屏幕捕获”组件时自动回退到 GDI 采集。
+- GDI 采集主屏（原生分辨率，32 位 DIB 直读 + BitBlt，避免 HALFTONE 缩放）→ **Media Foundation H.264 编码**（BGRA→NV12，CBR，无 B 帧、低延迟）或 libjpeg-turbo 4:4:4 JPEG 回退，后台 Isolate，不阻塞 UI。
+- 控制端在会话开始时自动协商 **H.264**：原生 Media Foundation 解码（独立 Isolate）→ BGRA → `ui.Image` 渲染；解码器不可用时自动回退 JPEG，Android 端保持 JPEG 兼容。
+- **有限 P2P**：Windows ↔ Windows 在同一局域网时，控制端先通过 UDP 7082 发现被控端，用验证码建立**完整直连会话**（视频、键鼠、控制、剪贴板），不依赖中继；直连不可达时才走中继。中继可用时，会话内还会通过 `control:p2p_offer` 交换直连地址，把视频切到直连；失败自动重试，断开回退中继并重建 IDR。会话栏显示“直连”或“中继”。
+- 另附原生采集加速模块 `app/windows/native/orbitlink_encoder`：优先使用 **Windows Graphics Capture**（D3D11 纹理直读）加速 JPEG 通路，系统未安装“屏幕捕获”组件时自动回退到 GDI 采集。
 - WebSocket 二进制帧传输，支持流畅 / 高清 / 超清画质与 5–30 FPS（流畅 1280px/62%、高清 1920px/85%、超清 1920px/92%）。
-- 控制端通过 `SendInput` / `SetCursorPos` 注入鼠标移动、按键、滚轮与键盘。
-- 单向剪贴板同步、中文文本发送、截屏保存到 `图片\OrbitLink`。
+- 控制端通过 `SendInput` / `SetCursorPos` 注入鼠标移动、按键、滚轮与键盘。会话画面会自动获取键盘焦点，支持字母、数字、符号、方向键、功能键与组合键；若焦点被对话框抢占，点击画面即可恢复。中文输入法请使用“发送文本”。
+- 单向剪贴板同步、中文文本发送；**截屏后自动复制到本机剪贴板**（同时提供 CF_DIB 与 PNG 格式，微信/QQ/浏览器可直接粘贴），并以 PNG 保存到 `图片\OrbitLink`。
 - 被控端顶部会话提醒，可随时结束协助。
-- 实测本机 1600×900 下约 **25–30 FPS**；局域网延迟通常在 1–20 ms，4:4:4 无色度抽样让文字更清晰。
+- 实测本机 1600×900 下 H.264 约 **25–27 FPS**、静态桌面约 **0.6–1 Mbps**；动态画面按画质档位提升，高清档 1600×900 目标约 12 Mbps、超清 2560×1440 最高约 **40 Mbps**。局域网延迟通常在 1–20 ms，H.264 与 4:4:4 JPEG 都能保持文字清晰。
 
 ### Android 双端
 - **控制端**：输入识别码/验证码连接；连接 Android 自动使用触控模式，连接 Windows 使用鼠标模式；支持文本、系统键、画质、剪贴板与最近设备。
@@ -93,7 +95,8 @@ server\build\orbitlink-relay.exe
 
 - **被控端**：确保「允许协助」开启，把识别码和验证码告诉对方。
 - **控制端**：在「远程协助他人」输入识别码与验证码，点击 **连接**。
-- 两台电脑必须连接同一个中继：**设置 → 连接设置**，例如 `ws://192.168.1.10:7080/ws`。
+- 跨网络连接时，控制端与被控端需使用同一个中继：**设置 → 连接设置**，例如 `ws://192.168.1.10:7080/ws`。
+- 同一局域网的 Windows ↔ Windows 会话会**优先完整直连，不需要中继**；会话栏显示“直连”或“中继”。若一直显示“中继”，在被控端以管理员身份运行 **`allow_p2p_firewall.bat`**，并确认网络配置文件不是“公用网络”。
 
 Windows 客户端启动后会自动注册本机，不需要手动「开启被控」。
 
@@ -138,36 +141,46 @@ adb install -r build\app\outputs\flutter-apk\app-release.apk
 
 ```
 ┌──────────────────────── 控制端 Flutter ────────────────────────┐
-│  AssistPage ──► AppController ──► ControllerSession ──► WebSocket │
-│                                        │                 │ JSON  │
-│                                        ▼                 │ 控制  │
-│                              ui.Image / RawImage ◄───────┘ 帧    │
+│  AssistPage ──► AppController ──► ControllerSession               │
+│                                        │  ├─ LAN：UDP 发现 + 完整直连 │
+│                                        │  ├─ LAN：中继会话内视频直连  │
+│                                        │  └─ 中继：跨网段 / 回退      │
+│                         H.264 解码 Isolate / JPEG 解码            │
+│                                        ▼                          │
+│                              ui.Image / RawImage                  │
 └───────────────────────────────────┬─────────────────────────────┘
-                                    │ ws://relay:7080/ws
+                                    │ ws://relay:7080/ws（可选）
 ┌───────────────────────────────────▼─────────────────────────────┐
 │                     Dart 中继 · OrbitLink Relay                  │
 │              注册 / 验证码校验 / 配对 / 双向消息与帧转发           │
 └───────────────────────────────────┬─────────────────────────────┘
-                                    │
+                                    │ 会话内交换直连地址 + 一次性 token
 ┌───────────────────────────────────▼─────────────────────────────┐
 │ 被控端 Flutter：HostEngine ──► CaptureWorker Isolate             │
-│                     │              └─ GDI 采集 → TurboJPEG 4:4:4 JPEG │
-│                     └─ InputInjector → SendInput / SetCursorPos   │
+│   ├─ UDP 7082 发现 + DirectVideoHost（密码直连 / token 视频）     │
+│   ├─ GDI BGRA → MF H.264（默认）/ WGC/GDI → TurboJPEG JPEG       │
+│   └─ InputInjector → SendInput / SetCursorPos                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-信令为 JSON（`t` 字段区分）：`hello` / `hello_ok` / `connect` / `ringing` / `incoming` / `accept` / `reject` / `session_start` / `input` / `clipboard` / `control` / `stats` / `end` / `error` / `ping` / `pong`。
+信令为 JSON（`t` 字段区分）：`hello` / `hello_ok` / `connect` / `ringing` / `incoming` / `accept` / `reject` / `session_start` / `input` / `clipboard` / `control` / `stats` / `p2p` / `end` / `error` / `ping` / `pong`。`control` 额外支持 `codec`（`h264` / `jpeg`）、`keyframe`（请求立即刷新 IDR）与 `p2p_offer`（直连地址 + token；旧版中继也会转发）。
 
-画面帧为 17 字节头 + JPEG：
+**局域网直连（无中继）**：控制端在连接前先向 UDP 7082 广播 `orbitlink_discover {target}`；被控端（允许协助且空闲）回复 `orbitlink_host {id, port, busy}`。控制端连接 `ws://<ip>:<port>/direct` 并发送 `direct_hello {target, password, from}`，被控端用本机验证码校验后回 `direct_ok`；这条连接承载视频、键鼠、控制与剪贴板，中继完全不参与。失败后才进入中继配对流程。
+
+**中继会话内的视频直连**：中继可用时，被控端生成一次性 token 和局域网端点，经 `control:p2p_offer` 下发；控制端按同网段优先排序，尝试 `p2p_hello`（session + token），被控端回 `p2p_ok` 后视频改走直连。首轮失败会间隔 3 秒重试，最多 2 次；断开或 2 秒无帧时回退中继并请求关键帧。此模式只承载视频，信令、键鼠与剪贴板仍走中继。
+
+画面帧为 17 字节头 + 负载：
 
 | 偏移 | 长度 | 内容 |
 |---|---|---|
-| 0 | 1 | 帧类型 `0x01`（JPEG） |
+| 0 | 1 | 帧类型：`0x01` JPEG，`0x02` H.264 P 帧，`0x03` H.264 IDR |
 | 1 | 4 | seq（uint32 LE） |
 | 5 | 2 | width（uint16 LE） |
 | 7 | 2 | height（uint16 LE） |
 | 9 | 8 | 时间戳 ms（int64 LE） |
-| 17 | n | JPEG 数据 |
+| 17 | n | JPEG 数据或 Annex-B H.264 访问单元（IDR 自带 SPS/PPS） |
+
+H.264 会话由控制端发起协商；被控端确认后首帧从 IDR 开始，默认 GOP 为 2 秒。控制端解码失败会自动请求关键帧，连续失败则回退 JPEG。网络与中继对帧内容透明转发，不需要改动。
 
 服务端地址：`ws://<host>:7080/ws`，健康检查：`http://<host>:7080/health`。
 
@@ -220,10 +233,13 @@ docker run -d --name orbitlink-relay \
 cd server
 dart compile exe bin\server.dart -o build\orbitlink-relay.exe
 
-:: Windows 客户端
+:: Windows 客户端（CMake 会自动编译原生媒体模块 orbitlink_encoder.dll）
 cd ..\app
 flutter pub get
 flutter build windows --release
+
+:: 原生 H.264 编解码自检（可选，需要 VS C++ 环境）
+call windows\native\orbitlink_encoder\build_h264_test.bat
 
 :: Android
 cd ..\mobile
@@ -233,6 +249,7 @@ flutter build apk --release
 
 构建产物：
 - 客户端：`app\build\windows\x64\runner\Release\orbitlink.exe`
+- H.264 编解码与采集加速：`app\build\windows\x64\runner\Release\orbitlink_encoder.dll`（缺失时自动回退 JPEG）
 - 中继：`server\build\orbitlink-relay.exe`
 - APK：`mobile\build\app\outputs\flutter-apk\app-release.apk`
 - Windows 发布包：`dist\OrbitLink-Windows-x64.zip`
@@ -250,11 +267,11 @@ OrbitLink/
 ├─ app/                              Flutter Windows 客户端
 │  ├─ lib/
 │  │  ├─ core/                       配置/身份/协议/AppController/WebSocket
-│  │  ├─ engine/                     被控端引擎、控制端会话、采集 Worker、键位映射
-│  │  ├─ native/                     Win32 / GDI / TurboJPEG / SendInput FFI
+│  │  ├─ engine/                     被控端引擎、控制端会话、P2P 直连、采集/解码 Worker、键位映射
+│  │  ├─ native/                     Win32 / GDI / TurboJPEG / MF H.264 / SendInput FFI
 │  │  ├─ theme/                      星轨设计 token 与 Material 图标映射
 │  │  └─ ui/                         顶部导航、页面、浮层、原创品牌组件
-│  └─ windows/                       Windows runner 与 OrbitLink 图标
+│  └─ windows/                       Windows runner、原生媒体模块与 OrbitLink 图标
 ├─ mobile/                           Android 单 APK 双端（Flutter + Kotlin）
 │  ├─ lib/                           控制端会话、移动 UI、桥接
 │  ├─ android/.../orbitlink/remote/  HostService / MediaProjection / Accessibility
@@ -271,7 +288,8 @@ OrbitLink/
 ├─ install_android.bat               安装并启动 Android 客户端
 ├─ start_relay.bat                   启动中继
 ├─ start_app.bat                     启动客户端
-└─ start_second_instance.bat         启动第二个本地实例
+├─ start_second_instance.bat         启动第二个本地实例
+└─ allow_p2p_firewall.bat            放行局域网 P2P 入站（管理员运行）
 ```
 
 ---
@@ -291,23 +309,25 @@ OrbitLink/
 
 ## 已知限制
 
-1. **中继模式，不是 P2P**：所有流量经中继转发，跨公网请部署 TLS 反向代理。
-2. **WebSocket 明文、验证码由中继校验**：仅建议用于可信环境；公网必须使用 WSS。
-3. **JPEG 画面链路**：4:4:4 MJPEG 最高约 30 FPS，依赖 CPU 编码（libjpeg-turbo）；无 H.264/AV1、无音频、无多屏切换；独占全屏/硬件覆盖层可能采集为黑屏。
-4. **H.264 编码待接入**：Media Foundation 的 H.264 **解码器已验证可用**，但硬件编码器要求异步 D3D11 设备管理器（MFCreateDXGI*SurfaceBuffer + 事件驱动 MFT）路径，尚未实现，因此当前仍走 MJPEG。
-5. **Windows Graphics Capture 需要系统组件**：未安装“屏幕捕获”可选功能时自动回退到 GDI 采集（本机 Win10 缺该组件，回退路径实测 25–30 FPS）。
-4. **部分会话工具仍是占位**：远程文件传输、文件闪传、语音聊天、隐私屏等尚未接入。
-5. **Windows UIPI**：普通权限进程无法向管理员权限窗口注入输入，需要以相同权限运行。
-6. **同机测试光标回环**：两端共享物理光标时会出现追尾与镜像，属于预期，请用两台设备体验。
-7. **Windows 锁屏**：桌面处于锁屏/安全桌面时 GDI 采集会被系统阻止。
-8. **Android 限制**：每次开启被控都要重新授权 MediaProjection；Android 14+ 复用单个 VirtualDisplay；分辨率在本次被控启动时固定；免 root 输入依赖无障碍服务，只能对焦点输入框注入文本；模拟器约 3–10 FPS。
-9. **防火墙**：局域网互联需放行中继端口；Docker 部署需放行宿主机映射端口。
+1. **有限 P2P**：同一局域网的 Windows ↔ Windows 可以完整直连（UDP 发现 + 验证码鉴权），不依赖中继；跨网段/严格 NAT 仍走中继，不做打洞。中继会话内的视频直连只承载视频，键鼠仍走中继。
+2. **WebSocket 明文、验证码由中继校验**：局域网直连的验证码也通过 `ws://` 传输，安全边界与中继一致，仅建议用于可信环境；公网必须使用 WSS/TLS 与访问控制。
+3. **H.264 使用软件编码**：当前走 Media Foundation 的 Microsoft H.264 Encoder MFT（CPU NV12），1600×900 实测 25–27 FPS；超清档 1080p 在高负载 CPU 上可能低于 30 FPS，硬件编码器/零拷贝路径尚未接入。已采用画质优先的高码率策略（上限 40 Mbps），复杂动态画面会占用较多带宽；无音频、无多屏切换；独占全屏/硬件覆盖层可能采集为黑屏。
+4. **H.264 与 WGC 尚未合并**：H.264 通路使用 GDI 采集（兼容所有 Windows 版本）；Windows Graphics Capture 目前只加速 JPEG 通路。WGC 需要系统“屏幕捕获”组件，本机 Win10 未安装，会自动回退 GDI。
+5. **Android 仍为 JPEG**：Android 控制端不请求 H.264，Android 被控端也仍推 JPEG；未接入 MediaCodec。P2P 视频仅限 Windows ↔ Windows，其余组合保持中继 + JPEG 兼容。
+6. **部分会话工具仍是占位**：远程文件传输、文件闪传、语音聊天、隐私屏等尚未接入。
+7. **Windows UIPI**：普通权限进程无法向管理员权限窗口注入输入，需要以相同权限运行。
+8. **同机测试光标回环**：两端共享物理光标时会出现追尾与镜像，属于预期，请用两台设备体验。
+9. **Windows 锁屏**：桌面处于锁屏/安全桌面时 GDI 采集会被系统阻止。
+10. **Android 限制**：每次开启被控都要重新授权 MediaProjection；Android 14+ 复用单个 VirtualDisplay；分辨率在本次被控启动时固定；免 root 输入依赖无障碍服务，只能对焦点输入框注入文本；模拟器约 3–10 FPS。
+11. **防火墙与 AP 隔离**：局域网完全直连需要被控端允许入站 UDP 7082（发现）和直连 TCP 端口；以管理员身份运行 `allow_p2p_firewall.bat`，并把网络设为“专用网络”或“域网络”。Wi-Fi AP 隔离/访客网络与跨 VLAN 会阻止直连，此时如果中继可用会自动回退中继；中继也不可用时连接会失败。Docker 部署需放行宿主机映射端口。
 
 ---
 
 ## 验证记录
 
-- Windows：两台实例经本机中继完成会话，GDI 采集 26 FPS、RTT 1 ms；新界面逐页截图验收。
+- Windows：同一台机器双实例经本机中继完成 H.264 会话——1600×900、25–27 FPS、RTT 1 ms、静态桌面 0.6–1 Mbps，连续 3 次会话稳定；JPEG 回退 25 FPS。原生编解码回环 PSNR 37.7 dB，编码约 5.7 ms/帧、解码约 7.4 ms/帧（含 NV12↔BGRA）。
+- P2P：Windows 双实例自动建立局域网直连，7 秒会话中 180/181 帧走直连；主动断开直连后 96 帧自动回退中继并收到新的 IDR；禁用直连时 172 帧全部经中继。真实控制端会话栏显示“直连 · H.264”。
+- 无中继直连：停掉中继后，控制端通过 UDP 7082 发现被控端并建立完整直连会话，收到 H.264 画面；ControllerSession 集成测试通过（transport=direct、latestFrame 非空）。
 - Android：Release APK 在 Android 模拟器安装运行，被控端注册、整屏 JPEG 推流、系统键与触摸注入均已验证；新版界面截图见 `docs/screenshots/`。
 - 中继：Windows AOT 可执行文件与 Docker 镜像 `orbitlink-relay:1.0.0` 均通过 `/health` 检查；容器只读、非 root 运行正常。
 

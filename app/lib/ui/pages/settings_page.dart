@@ -515,7 +515,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
       children: [
         const _ContentHeading(
           title: '连接设置',
-          subtitle: '控制端与被控端需要连接同一个中继服务器。',
+          subtitle: '跨网络连接时需使用同一个中继；同一局域网会优先直连，不依赖中继。',
         ),
         _Section(
           title: '中继服务器',
@@ -642,7 +642,8 @@ class _DesktopPageState extends State<_DesktopPage> {
         ),
         _Section(
           title: '画面参数',
-          subtitle: '默认 1920 px / 85% / 30 FPS，4:4:4 无色度抽样，文字更清晰。',
+          subtitle:
+              '默认 1920 px / 85% / 30 FPS；H.264 高码率优先保证清晰度，JPEG 回退为 4:4:4。',
           children: [
             Row(
               children: [

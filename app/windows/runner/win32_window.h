@@ -64,6 +64,10 @@ class Win32Window {
                                  WPARAM const wparam,
                                  LPARAM const lparam) noexcept;
 
+  // Returns a resize hit-test code for the frameless window edges, or 0 when
+  // the point is inside the content area.
+  static LRESULT ResizeHitTest(HWND window, LPARAM lparam);
+
   // Called when CreateAndShow is called, allowing subclass window-related
   // setup. Subclasses should return false if setup fails.
   virtual bool OnCreate();

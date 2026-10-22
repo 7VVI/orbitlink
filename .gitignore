@@ -30,3 +30,14 @@ server/build/
 .tmp/
 .data/
 *.log
+
+# Native self-test artifacts
+app/windows/native/orbitlink_encoder/*.obj
+app/windows/native/orbitlink_encoder/*.exe
+app/windows/native/orbitlink_encoder/*.lib
+app/windows/native/orbitlink_encoder/*.exp
+app/windows/native/orbitlink_encoder/*.pdb
+app/windows/native/orbitlink_encoder/*.bgra
+app/windows/native/orbitlink_encoder/*.h264
+app/windows/native/orbitlink_encoder/*.png
+app/windows/native/orbitlink_encoder/turbojpeg.dll

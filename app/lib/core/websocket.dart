@@ -18,3 +18,11 @@ WebSocketChannel connectRelay(String url) {
     pingInterval: const Duration(seconds: 20),
   );
 }
+
+/// Opens a LAN P2P video socket without going through a system proxy.
+Future<WebSocket> connectDirectSocket(
+  String url, {
+  Duration timeout = const Duration(seconds: 2),
+}) {
+  return WebSocket.connect(url, customClient: _directClient).timeout(timeout);
+}

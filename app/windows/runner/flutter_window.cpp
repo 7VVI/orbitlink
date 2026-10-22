@@ -51,6 +51,13 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // The frameless window needs edge hit-testing before Flutter/plugins get a
+  // chance to consume the mouse message.
+  if (message == WM_NCHITTEST) {
+    const LRESULT hit = ResizeHitTest(hwnd, lparam);
+    if (hit != 0) return hit;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

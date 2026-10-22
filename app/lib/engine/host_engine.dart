@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -9,6 +10,7 @@ import '../core/websocket.dart';
 import '../core/protocol.dart';
 import '../native/win32.dart';
 import 'capture_worker.dart';
+import 'direct_host.dart';
 
 enum RelayStatus { disconnected, connecting, online, error }
 
@@ -56,6 +58,7 @@ class HostEngine {
   Timer? _heartbeatTimer;
   Timer? _registerTimeout;
   CaptureWorker? _worker;
+  final DirectVideoHost _direct = DirectVideoHost();
 
   String? _activeSessionId;
   String _peerName = '';
@@ -66,6 +69,8 @@ class HostEngine {
   int _captureGeneration = 0;
   Timer? _statsTimer;
   bool _capturing = false;
+  bool _directSessionActive = false;
+  bool _directFullSession = false;
   int _frameSeq = 0;
   int _frameWidth = 0;
   int _frameHeight = 0;
@@ -75,11 +80,25 @@ class HostEngine {
   int? _qualityOverride;
   int? _widthOverride;
   int? _fpsOverride;
+  String _requestedCodec = 'jpeg';
+  String _effectiveCodec = 'jpeg';
+  bool _restartEncoder = false;
   DateTime _lastCaptureError = DateTime.fromMillisecondsSinceEpoch(0);
 
   Future<void> start() async {
     _disposed = false;
     _noReconnect = false;
+    _direct.configure(
+      id: identity.id,
+      name: identity.name,
+      password: identity.password,
+      canAcceptSession: () => settings.allowRemote && _activeSessionId == null,
+      onSessionStart: _startDirectSession,
+      onSessionMessage: _handleDirectSessionMessage,
+      onSessionEnded: _onDirectSessionClosed,
+    );
+    await _direct.start();
+    await _direct.setDiscoverable(settings.allowRemote);
     await _connect();
   }
 
@@ -94,6 +113,9 @@ class HostEngine {
     final urlChanged = settings.relayUrl != next.relayUrl;
     final registrationChanged = settings.allowRemote != next.allowRemote;
     settings = next;
+    if (registrationChanged) {
+      unawaited(_direct.setDiscoverable(next.allowRemote));
+    }
     if (urlChanged || registrationChanged) {
       _restart();
     } else if (_activeSessionId != null && _fpsOverride == null) {
@@ -169,7 +191,11 @@ class HostEngine {
         return;
       }
       _waitingPong = true;
-      _send({'t': RelayMessage.ping});
+      final channel = _channel;
+      if (channel == null) return;
+      try {
+        channel.sink.add(jsonEncode({'t': RelayMessage.ping}));
+      } catch (_) {}
     });
   }
 
@@ -217,6 +243,10 @@ class HostEngine {
   }
 
   void _send(Map<String, dynamic> message) {
+    if (_direct.fullSession) {
+      _direct.sendJson(message);
+      return;
+    }
     final channel = _channel;
     if (channel == null) return;
     try {
@@ -315,6 +345,12 @@ class HostEngine {
     _qualityOverride = null;
     _widthOverride = null;
     _fpsOverride = null;
+    _requestedCodec = 'jpeg';
+    _effectiveCodec = 'jpeg';
+    _restartEncoder = false;
+    _directSessionActive = false;
+    _directFullSession = false;
+    _setupDirect(id);
     session.value = HostSessionInfo(
       sessionId: id,
       controllerName: _peerName,
@@ -329,6 +365,97 @@ class HostEngine {
     _startCaptureLoop();
     _startStats();
     onEvent?.call('$_peerName 正在远程控制本机');
+  }
+
+  String? _startDirectSession(String peer, String address) {
+    if (!settings.allowRemote || _activeSessionId != null) return null;
+    final id = 'direct-${DateTime.now().microsecondsSinceEpoch}';
+    _activeSessionId = id;
+    _peerName = peer;
+    _peerAddress = address;
+    _mode = 'desktop';
+    _frameSeq = 0;
+    _statFrames = 0;
+    _statBytes = 0;
+    _statSince = DateTime.now();
+    _qualityOverride = null;
+    _widthOverride = null;
+    _fpsOverride = null;
+    _requestedCodec = 'jpeg';
+    _effectiveCodec = 'jpeg';
+    _restartEncoder = true;
+    _directSessionActive = true;
+    _directFullSession = true;
+    session.value = HostSessionInfo(
+      sessionId: id,
+      controllerName: peer,
+      controllerAddress: address,
+      mode: 'desktop',
+      startedAt: DateTime.now(),
+    );
+    _worker ??= CaptureWorker();
+    unawaited(_startDirectCapture(id));
+    onEvent?.call('$peer 正在远程控制本机');
+    return id;
+  }
+
+  Future<void> _startDirectCapture(String id) async {
+    try {
+      await _worker?.start();
+    } catch (_) {}
+    if (_activeSessionId != id) return;
+    _startCaptureLoop();
+    _startStats();
+  }
+
+  void _handleDirectSessionMessage(Map<String, dynamic> message) {
+    if (_activeSessionId == null || !_directFullSession) return;
+    switch (message['t'] as String? ?? '') {
+      case RelayMessage.input:
+        _applyInput(message);
+        break;
+      case RelayMessage.clipboard:
+        final text = message['text'] as String?;
+        if (text != null) onRemoteClipboard?.call(text);
+        break;
+      case RelayMessage.control:
+        _onControl(message);
+        break;
+      case RelayMessage.sessionEnd:
+        endSession();
+        break;
+    }
+  }
+
+  void _onDirectSessionClosed() {
+    if (!_directFullSession) return;
+    _directFullSession = false;
+    _stopSession(notify: true);
+  }
+
+  void _setupDirect(String sessionId) {
+    _direct.revoke();
+    final endpoints = _direct.endpoints;
+    if (endpoints.isEmpty) return;
+    final token = _newSessionToken();
+    _direct.authorize(sessionId, token);
+    // Keep the offer on the generic control channel so relays that predate
+    // the dedicated p2p message still forward it.
+    _send({
+      't': RelayMessage.control,
+      'action': 'p2p_offer',
+      'session': sessionId,
+      'token': token,
+      'endpoints': endpoints,
+    });
+  }
+
+  String _newSessionToken() {
+    final random = Random.secure();
+    return List<String>.generate(
+      16,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
   }
 
   void _startCaptureLoop() {
@@ -360,16 +487,26 @@ class HostEngine {
 
   Future<void> _captureTick() async {
     if (_activeSessionId == null || _capturing) return;
-    final channel = _channel;
     final worker = _worker;
-    if (channel == null || worker == null) return;
+    if (worker == null) return;
+    if (_channel == null && !_direct.fullSession) return;
     _capturing = true;
     try {
+      // A transport switch starts a fresh encoder so the receiver always gets
+      // an IDR on the new channel (both into direct mode and back to relay).
+      final directConnected = _direct.active;
+      if (directConnected != _directSessionActive) {
+        _directSessionActive = directConnected;
+        _restartEncoder = true;
+      }
       final frame = await worker.capture(
         maxWidth: _widthOverride ?? settings.maxWidth,
         quality: _qualityOverride ?? settings.jpegQuality,
         fps: _fpsOverride ?? settings.fps,
+        h264: _requestedCodec == 'h264',
+        restartEncoder: _restartEncoder,
       );
+      _restartEncoder = false;
       if (frame == null) {
         final now = DateTime.now();
         if (now.difference(_lastCaptureError).inSeconds > 10 &&
@@ -379,17 +516,37 @@ class HostEngine {
         }
         return;
       }
-      if (_activeSessionId == null || _channel == null) return;
+      if (_activeSessionId == null) return;
       _frameWidth = frame.width;
       _frameHeight = frame.height;
+      final codec = frame.isH264 ? 'h264' : 'jpeg';
+      if (codec != _effectiveCodec) {
+        _effectiveCodec = codec;
+        if (codec != _requestedCodec) _requestedCodec = codec;
+        _send({
+          't': RelayMessage.control,
+          'action': 'codec',
+          'value': codec,
+        });
+      }
+      final type = frame.isH264
+          ? (frame.keyframe ? h264KeyFrameType : h264FrameType)
+          : jpegFrameType;
       final bytes = encodeFrame(
+        type: type,
         seq: ++_frameSeq,
         width: frame.width,
         height: frame.height,
         timestampMs: frame.timestampMs,
-        jpeg: frame.jpeg,
+        payload: frame.bytes,
       );
-      _channel!.sink.add(bytes);
+      if (_directSessionActive && _direct.active) {
+        _direct.send(bytes);
+      } else {
+        final channel = _channel;
+        if (channel == null) return;
+        channel.sink.add(bytes);
+      }
       _statFrames++;
       _statBytes += bytes.length;
     } catch (_) {
@@ -413,6 +570,8 @@ class HostEngine {
         'width': _frameWidth,
         'height': _frameHeight,
         'quality': _qualityOverride ?? settings.jpegQuality,
+        'codec': _effectiveCodec,
+        'transport': _direct.active ? 'direct' : 'relay',
       });
       _statFrames = 0;
       _statBytes = 0;
@@ -496,6 +655,19 @@ class HostEngine {
         _fpsOverride = fps.clamp(5, 30);
         if (_activeSessionId != null) _startCaptureLoop();
         break;
+      case 'codec':
+        final codec = message['value'] == 'h264' ? 'h264' : 'jpeg';
+        if (_requestedCodec != codec) {
+          _requestedCodec = codec;
+          if (_activeSessionId != null) _startCaptureLoop();
+        }
+        break;
+      case 'keyframe':
+        if (_requestedCodec == 'h264') {
+          _restartEncoder = true;
+          _startCaptureLoop();
+        }
+        break;
       case 'end':
         endSession();
         break;
@@ -522,6 +694,12 @@ class HostEngine {
     _qualityOverride = null;
     _widthOverride = null;
     _fpsOverride = null;
+    _requestedCodec = 'jpeg';
+    _effectiveCodec = 'jpeg';
+    _restartEncoder = false;
+    _directSessionActive = false;
+    _directFullSession = false;
+    _direct.revoke();
     if (wasActive && notify) onEvent?.call('远程控制已结束');
   }
 
@@ -541,6 +719,7 @@ class HostEngine {
     _closeChannel();
     _worker?.dispose();
     _worker = null;
+    unawaited(_direct.dispose());
     status.dispose();
     statusDetail.dispose();
     session.dispose();

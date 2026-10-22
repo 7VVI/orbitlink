@@ -1,7 +1,9 @@
 #include "win32_window.h"
 
+#include <commctrl.h>
 #include <dwmapi.h>
 #include <flutter_windows.h>
+#include <windowsx.h>
 
 #include "resource.h"
 
@@ -28,6 +30,32 @@ constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme"
 
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
+
+// The Flutter view covers the whole frameless window, so let the parent
+// window handle hit-testing at the edges and provide resize grips.
+LRESULT CALLBACK FlutterViewHitTest(HWND hwnd,
+                                    UINT message,
+                                    WPARAM wparam,
+                                    LPARAM lparam,
+                                    UINT_PTR subclass_id,
+                                    DWORD_PTR ref_data) {
+  (void)wparam;
+  (void)subclass_id;
+  (void)ref_data;
+  if (message == WM_NCHITTEST) {
+    const HWND parent = GetParent(hwnd);
+    RECT rect;
+    if (parent != nullptr && GetWindowRect(parent, &rect)) {
+      const POINT point = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      constexpr int kGrip = 6;
+      if (point.x < rect.left + kGrip || point.x >= rect.right - kGrip ||
+          point.y < rect.top + kGrip || point.y >= rect.bottom - kGrip) {
+        return HTTRANSPARENT;
+      }
+    }
+  }
+  return DefSubclassProc(hwnd, message, wparam, lparam);
+}
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 
@@ -213,6 +241,14 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
 
+    case WM_NCHITTEST: {
+      // The window is frameless, so the native frame no longer provides
+      // resize handles. Expose a thin invisible grip at the edges.
+      const LRESULT hit = ResizeHitTest(hwnd, lparam);
+      if (hit != 0) return hit;
+      break;
+    }
+
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       UpdateTheme(hwnd);
       return 0;
@@ -224,6 +260,10 @@ Win32Window::MessageHandler(HWND hwnd,
 void Win32Window::Destroy() {
   OnDestroy();
 
+  if (child_content_ != nullptr) {
+    RemoveWindowSubclass(child_content_, FlutterViewHitTest, 1);
+    child_content_ = nullptr;
+  }
   if (window_handle_) {
     DestroyWindow(window_handle_);
     window_handle_ = nullptr;
@@ -241,6 +281,7 @@ Win32Window* Win32Window::GetThisFromHandle(HWND const window) noexcept {
 void Win32Window::SetChildContent(HWND content) {
   child_content_ = content;
   SetParent(content, window_handle_);
+  SetWindowSubclass(content, FlutterViewHitTest, 1, 0);
   RECT frame = GetClientArea();
 
   MoveWindow(content, frame.left, frame.top, frame.right - frame.left,
@@ -253,6 +294,32 @@ RECT Win32Window::GetClientArea() {
   RECT frame;
   GetClientRect(window_handle_, &frame);
   return frame;
+}
+
+// static
+LRESULT Win32Window::ResizeHitTest(HWND window, LPARAM lparam) {
+  if (IsZoomed(window) ||
+      (GetWindowLongPtr(window, GWL_STYLE) & WS_THICKFRAME) == 0) {
+    return 0;
+  }
+  POINT point = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+  RECT rect;
+  GetWindowRect(window, &rect);
+  constexpr int kGrip = 6;
+  const bool left = point.x >= rect.left && point.x < rect.left + kGrip;
+  const bool right = point.x < rect.right && point.x >= rect.right - kGrip;
+  const bool top = point.y >= rect.top && point.y < rect.top + kGrip;
+  const bool bottom =
+      point.y < rect.bottom && point.y >= rect.bottom - kGrip;
+  if (top && left) return HTTOPLEFT;
+  if (top && right) return HTTOPRIGHT;
+  if (bottom && left) return HTBOTTOMLEFT;
+  if (bottom && right) return HTBOTTOMRIGHT;
+  if (left) return HTLEFT;
+  if (right) return HTRIGHT;
+  if (top) return HTTOP;
+  if (bottom) return HTBOTTOM;
+  return 0;
 }
 
 HWND Win32Window::GetHandle() {

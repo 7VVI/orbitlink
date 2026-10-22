@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/models.dart';
-import '../../engine/host_engine.dart';
 import '../../theme/app_icons.dart';
 import '../../theme/app_theme.dart';
 import '../app_scope.dart';
@@ -272,19 +271,6 @@ class _SelfDeviceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final status = controller.relayStatus;
-    final color = switch (status) {
-      RelayStatus.online => AppColors.success,
-      RelayStatus.connecting => AppColors.warning,
-      RelayStatus.error => AppColors.danger,
-      RelayStatus.disconnected => AppColors.textTertiary,
-    };
-    final label = switch (status) {
-      RelayStatus.online => '中继在线',
-      RelayStatus.connecting => '连接中',
-      RelayStatus.error => '连接异常',
-      RelayStatus.disconnected => '未连接',
-    };
     return AppCard(
       child: Column(
         children: [
@@ -349,35 +335,6 @@ class _SelfDeviceCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 12),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-                decoration: BoxDecoration(
-                  color: color.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(AppRadii.chip),
-                  border: Border.all(color: color.withOpacity(0.2)),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration:
-                          BoxDecoration(color: color, shape: BoxShape.circle),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      label,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w500,
-                        color: color,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 14),
               GhostButton(
                 label: '复制识别码',
                 width: 104,
@@ -426,27 +383,6 @@ class _SelfDeviceCard extends StatelessWidget {
                   color: AppColors.primary,
                   tooltip: '复制识别码',
                   onTap: controller.copyDeviceId,
-                ),
-                const Spacer(),
-                const Icon(Icons.dns_outlined,
-                    size: 15, color: AppColors.textTertiary),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    _shortRelay(controller.settings.relayUrl),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppText.tiny,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                TextLink(
-                  label: '中继设置',
-                  fontSize: 12,
-                  onTap: () {
-                    controller.setSettingsTab(SettingsTab.general);
-                    controller.setTab(NavTab.settings);
-                  },
                 ),
               ],
             ),
@@ -870,11 +806,4 @@ String _relativeTime(DateTime time) {
   if (diff.inDays < 1) return '${diff.inHours} 小时前';
   if (diff.inDays < 30) return '${diff.inDays} 天前';
   return '${time.year}/${time.month}/${time.day}';
-}
-
-String _shortRelay(String url) {
-  final uri = Uri.tryParse(url);
-  if (uri == null || uri.host.isEmpty) return url;
-  final port = uri.hasPort ? ':${uri.port}' : '';
-  return '${uri.host}$port';
 }

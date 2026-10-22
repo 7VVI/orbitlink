@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/models.dart';
-import '../../engine/host_engine.dart';
 import '../../theme/app_icons.dart';
 import '../../theme/app_theme.dart';
 import '../app_scope.dart';
@@ -120,8 +119,6 @@ class _AssistPageState extends State<AssistPage> {
                     settings.allowRemote ? '已开启' : '已暂停',
                     style: AppText.hint,
                   ),
-                  const Spacer(),
-                  _RelayPill(status: controller.relayStatus),
                 ],
               ),
               const SizedBox(height: 24),
@@ -188,30 +185,6 @@ class _AssistPageState extends State<AssistPage> {
               if (controller.hostSession != null) ...[
                 const SizedBox(height: 20),
                 _ActiveSessionBar(controller: controller),
-              ],
-              if (controller.relayStatus == RelayStatus.error) ...[
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    const Icon(AppIcons.error,
-                        size: 14, color: AppColors.danger),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        controller.host.statusDetail.value ?? '中继连接异常',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: AppColors.danger,
-                        ),
-                      ),
-                    ),
-                    TextLink(
-                      label: '重新连接',
-                      fontSize: 12,
-                      onTap: controller.host.retry,
-                    ),
-                  ],
-                ),
               ],
               const SizedBox(height: 42),
               const Text(
@@ -452,55 +425,6 @@ class _IdentityValue extends StatelessWidget {
         const SizedBox(height: 6),
         child,
       ],
-    );
-  }
-}
-
-class _RelayPill extends StatelessWidget {
-  const _RelayPill({required this.status});
-
-  final RelayStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = switch (status) {
-      RelayStatus.online => AppColors.success,
-      RelayStatus.connecting => AppColors.warning,
-      RelayStatus.error => AppColors.danger,
-      RelayStatus.disconnected => AppColors.textTertiary,
-    };
-    final label = switch (status) {
-      RelayStatus.online => '中继已连接',
-      RelayStatus.connecting => '正在连接中继',
-      RelayStatus.error => '中继连接异常',
-      RelayStatus.disconnected => '中继未连接',
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(AppRadii.chip),
-        border: Border.all(color: color.withOpacity(0.2)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 11.5,
-              fontWeight: FontWeight.w500,
-              color: color,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

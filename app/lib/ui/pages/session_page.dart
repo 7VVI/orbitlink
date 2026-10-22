@@ -9,8 +9,10 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/protocol.dart';
 import '../../engine/controller_session.dart';
 import '../../engine/key_map.dart';
+import '../../native/clipboard_image.dart';
 import '../../theme/app_icons.dart';
 import '../../theme/app_theme.dart';
 import '../app_scope.dart';
@@ -35,6 +37,7 @@ class _SessionPageState extends State<SessionPage> {
   int? _queuedSeq;
   bool _fullscreen = false;
   bool _pointerInside = false;
+  bool _keyboardFocusRequested = false;
   final Set<String> _pressed = {};
 
   ControllerSession get session => widget.session;
@@ -47,6 +50,7 @@ class _SessionPageState extends State<SessionPage> {
     session.peerName.addListener(_onChanged);
     session.peerPlatform.addListener(_onChanged);
     session.stats.addListener(_onChanged);
+    session.transport.addListener(_onChanged);
     session.latestFrame.addListener(_onFrame);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -83,8 +87,12 @@ class _SessionPageState extends State<SessionPage> {
       _onFrame();
       return;
     }
+    if (frame.isH264) {
+      _decodeRaw(frame);
+      return;
+    }
     try {
-      final codec = await ui.instantiateImageCodec(frame.jpeg);
+      final codec = await ui.instantiateImageCodec(frame.bytes);
       final info = await codec.getNextFrame();
       codec.dispose();
       if (!mounted) {
@@ -94,18 +102,68 @@ class _SessionPageState extends State<SessionPage> {
       final previous = _image;
       setState(() => _image = info.image);
       previous?.dispose();
+      _requestKeyboardFocus();
     } catch (_) {
       // A truncated frame can appear while the relay is reconnecting.
     } finally {
       _decoding = false;
     }
+    _decodeNext();
+  }
+
+  void _decodeRaw(RenderedFrame frame) {
+    final expected = frame.width * frame.height * 4;
+    if (expected <= 0 || frame.bytes.length < expected) {
+      _decoding = false;
+      _decodeNext();
+      return;
+    }
+    try {
+      ui.decodeImageFromPixels(
+        frame.bytes,
+        frame.width,
+        frame.height,
+        ui.PixelFormat.bgra8888,
+        (image) {
+          if (!mounted) {
+            image.dispose();
+            _decoding = false;
+            return;
+          }
+          final previous = _image;
+          setState(() => _image = image);
+          previous?.dispose();
+          _requestKeyboardFocus();
+          _decoding = false;
+          _decodeNext();
+        },
+      );
+    } catch (_) {
+      // A truncated frame can appear while the relay is reconnecting.
+      _decoding = false;
+      _decodeNext();
+    }
+  }
+
+  void _decodeNext() {
+    if (!mounted) return;
     final latest = session.latestFrame.value;
     if (latest != null && latest.seq != _decodedSeq) {
       _decode(latest.seq);
     } else if (_queuedSeq != null && _queuedSeq != _decodedSeq) {
-      _decode(_queuedSeq!);
+      final queued = _queuedSeq!;
       _queuedSeq = null;
+      _decode(queued);
     }
+  }
+
+  void _requestKeyboardFocus() {
+    if (_keyboardFocusRequested || !mounted) return;
+    if (session.state.value != ControllerState.connected) return;
+    _keyboardFocusRequested = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_focus.hasFocus) _focus.requestFocus();
+    });
   }
 
   @override
@@ -115,6 +173,7 @@ class _SessionPageState extends State<SessionPage> {
     session.peerName.removeListener(_onChanged);
     session.peerPlatform.removeListener(_onChanged);
     session.stats.removeListener(_onChanged);
+    session.transport.removeListener(_onChanged);
     session.latestFrame.removeListener(_onFrame);
     _image?.dispose();
     if (_fullscreen) windowManager.setFullScreen(false);
@@ -170,22 +229,46 @@ class _SessionPageState extends State<SessionPage> {
 
   Future<void> _screenshot() async {
     final controller = AppScope.read(context);
-    final frame = session.latestFrame.value;
-    if (frame == null) {
+    final image = _image?.clone();
+    if (image == null) {
       controller.showToast('暂无画面可截取');
       return;
     }
+    var copied = false;
+    var saved = false;
     try {
-      final base = Platform.environment['USERPROFILE'] ?? '.';
-      final dir = Directory('$base\\Pictures\\OrbitLink');
-      dir.createSync(recursive: true);
-      final now = DateTime.now();
-      final name =
-          'OrbitLink_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}.jpg';
-      final file = File('${dir.path}\\$name');
-      file.writeAsBytesSync(frame.jpeg);
-      controller.showToast('截屏已保存：${file.path}');
-    } catch (e) {
+      final png = await image.toByteData(format: ui.ImageByteFormat.png);
+      final raw = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (png != null &&
+          raw != null &&
+          copyImageToClipboard(
+            rgba: raw.buffer.asUint8List(raw.offsetInBytes, raw.lengthInBytes),
+            width: image.width,
+            height: image.height,
+            png: png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+          )) {
+        copied = true;
+      }
+      if (png != null) {
+        final base = Platform.environment['USERPROFILE'] ?? '.';
+        final dir = Directory('$base\\Pictures\\OrbitLink');
+        dir.createSync(recursive: true);
+        final now = DateTime.now();
+        final name =
+            'OrbitLink_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}.png';
+        final file = File('${dir.path}\\$name');
+        file.writeAsBytesSync(png.buffer.asUint8List());
+        saved = true;
+      }
+    } catch (_) {
+    } finally {
+      image.dispose();
+    }
+    if (copied) {
+      controller.showToast('截屏已复制到剪贴板，可直接粘贴发送');
+    } else if (saved) {
+      controller.showToast('截屏已保存，但复制到剪贴板失败');
+    } else {
       controller.showToast('截屏保存失败');
     }
   }
@@ -335,7 +418,7 @@ class _SessionPageState extends State<SessionPage> {
                     const _StatusDot(color: AppColors.success),
                     const SizedBox(width: 6),
                     Text(
-                      '中继 · 高清 · ${stats.fps} 帧 · ${stats.latencyMs} ms',
+                      '${session.transport.value == 'direct' ? '直连' : '中继'} · ${stats.codec == 'h264' ? 'H.264' : '高清'} · ${stats.fps} 帧 · ${stats.latencyMs} ms',
                       style: const TextStyle(
                         fontSize: 11,
                         color: AppColors.sessionMuted,
@@ -362,7 +445,7 @@ class _SessionPageState extends State<SessionPage> {
                   ),
                   _TopAction(
                     icon: AppIcons.screenCapture,
-                    tooltip: '截屏',
+                    tooltip: '截屏并复制',
                     onTap: connected ? _screenshot : null,
                   ),
                   const SizedBox(width: 4),
@@ -487,6 +570,7 @@ class _SessionPageState extends State<SessionPage> {
               },
               child: Focus(
                 focusNode: _focus,
+                autofocus: true,
                 onKeyEvent: (node, event) {
                   if (!connected) return KeyEventResult.ignored;
                   if (event.logicalKey == LogicalKeyboardKey.escape) {
@@ -605,7 +689,7 @@ class _SessionPageState extends State<SessionPage> {
                 Text(session.peerName.value, style: AppText.hint),
                 const SizedBox(height: 6),
                 const Text(
-                  '通过中继服务器连接，验证通过后自动开始',
+                  '验证通过后自动开始，局域网内会优先尝试直连',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12, color: AppColors.textTertiary),
                 ),
@@ -804,7 +888,7 @@ class _SessionPageState extends State<SessionPage> {
               label: '更多',
               afterAction: () => _focus.requestFocus(),
               menu: [
-                _MenuItem('截屏', _screenshot),
+                _MenuItem('截屏并复制', _screenshot),
                 _MenuItem('同步本机剪贴板', _syncClipboard),
                 _MenuItem('退出全屏/全屏', _toggleFullscreen),
               ],

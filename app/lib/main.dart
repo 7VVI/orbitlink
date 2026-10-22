@@ -3,7 +3,6 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'core/app_controller.dart';
-import 'native/win32.dart';
 import 'theme/app_theme.dart';
 import 'ui/app_scope.dart';
 import 'ui/shell/app_shell.dart';
@@ -21,17 +20,17 @@ Future<void> main() async {
     titleBarStyle: TitleBarStyle.hidden,
   );
   windowManager.waitUntilReadyToShow(options, () async {
+    // TitleBarStyle.hidden still reserves an 8px native resize gutter on both
+    // sides, which shows up as white bars. A frameless window lets the
+    // Flutter view cover the whole window instead.
+    await windowManager.setAsFrameless();
     await windowManager.show();
     await windowManager.focus();
-    // Keep the visible client area at the design size despite the invisible
-    // native resize frame.
-    final padding = WindowMetrics.clientPadding();
-    final extraW = padding.$1 > 0 && padding.$1 < 40 ? padding.$1 : 16;
-    final extraH = padding.$2 > 0 && padding.$2 < 40 ? padding.$2 : 8;
-    await windowManager.setMinimumSize(
-        Size(1000 + extraW.toDouble(), 640 + extraH.toDouble()));
-    await windowManager
-        .setSize(Size(1120 + extraW.toDouble(), 720 + extraH.toDouble()));
+    // Removing the frame grows the client area without a WM_SIZE, so nudge
+    // the window once to make the Flutter view fill the new height.
+    await windowManager.setSize(const Size(1121, 721));
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    await windowManager.setSize(const Size(1120, 720));
     await windowManager.center();
   });
   runApp(const OrbitLinkApp());
