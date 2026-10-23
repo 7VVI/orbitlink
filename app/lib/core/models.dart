@@ -90,6 +90,10 @@ class RecentDevice {
 class AppSettings {
   AppSettings({
     this.relayUrl = 'ws://127.0.0.1:7080/ws',
+    this.stunUrl = 'stun:stun.l.google.com:19302',
+    this.turnUrl = '',
+    this.turnUsername = '',
+    this.turnCredential = '',
     this.allowRemote = true,
     this.autoAcceptKnown = false,
     this.maxWidth = 1920,
@@ -118,6 +122,10 @@ class AppSettings {
   });
 
   String relayUrl;
+  String stunUrl;
+  String turnUrl;
+  String turnUsername;
+  String turnCredential;
   bool allowRemote;
   bool autoAcceptKnown;
   int maxWidth;
@@ -147,6 +155,10 @@ class AppSettings {
   factory AppSettings.fromJson(Map<String, dynamic> json) {
     final d = AppSettings();
     d.relayUrl = json['relayUrl'] as String? ?? d.relayUrl;
+    d.stunUrl = json['stunUrl'] as String? ?? d.stunUrl;
+    d.turnUrl = json['turnUrl'] as String? ?? d.turnUrl;
+    d.turnUsername = json['turnUsername'] as String? ?? d.turnUsername;
+    d.turnCredential = json['turnCredential'] as String? ?? d.turnCredential;
     d.allowRemote = json['allowRemote'] as bool? ?? d.allowRemote;
     d.autoAcceptKnown = json['autoAcceptKnown'] as bool? ?? d.autoAcceptKnown;
     d.maxWidth = (json['maxWidth'] as num?)?.toInt() ?? d.maxWidth;
@@ -185,6 +197,10 @@ class AppSettings {
 
   Map<String, dynamic> toJson() => {
         'relayUrl': relayUrl,
+        'stunUrl': stunUrl,
+        'turnUrl': turnUrl,
+        'turnUsername': turnUsername,
+        'turnCredential': turnCredential,
         'allowRemote': allowRemote,
         'autoAcceptKnown': autoAcceptKnown,
         'maxWidth': maxWidth,

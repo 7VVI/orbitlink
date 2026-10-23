@@ -1,12 +1,15 @@
 # 星轨远控 · OrbitLink
 
-一套可运行的跨平台远程控制软件：Windows 客户端、Android 双角色客户端、Dart WebSocket 中继服务器。
+跨平台远程控制软件：Windows 客户端、Android 双角色客户端、Dart WebSocket 信令服务器。
+
+`main` 使用 WebRTC：视频走 SRTP，输入走 DataChannel，ICE 优先直连，无法直连时使用自营标准 TURN。`main_ws` 保留迁移前的 WebSocket 视频与局域网发现实现。当前没有另外实现 QUIC 传输栈。
 
 **星轨远控**采用全新的浅色界面与「星轨」品牌视觉，使用 Material Icons 与自制品牌图形，不包含原版向日葵的图标字体、图片素材或品牌元素。启动即用，没有账号、登录、广告或推广位。
 
-- **Windows**：Flutter UI → `dart:ffi` 调用 Win32 GDI / TurboJPEG / Media Foundation H.264 / SendInput，真实屏幕采集与键鼠注入。
-- **Android**：单个 APK 同时具备控制端与被控端，Kotlin `MediaProjection` + `AccessibilityService`。
-- **中继**：Dart 编写的轻量 WebSocket 服务器，支持 Windows 可执行文件与 Docker 部署。
+- **Windows**：Flutter + flutter_webrtc 屏幕轨道与纹理渲染，H.264 优先；Win32 SendInput 注入键鼠。
+- **Android**：单 APK 双角色，Flutter WebRTC 控制端，Kotlin ScreenCapturerAndroid + MediaProjection 被控端，AccessibilityService 输入。
+- **信令**：Dart WebSocket 负责身份注册、验证码校验和 SDP/ICE 交换；支持 Windows 可执行文件与 Docker 部署。
+- **TURN**：需自行部署符合标准协议的服务，本仓库客户端提供 STUN/TURN 地址与凭据设置，不包含 TURN 服务器实现。
 
 ---
 
@@ -49,24 +52,24 @@
 - **设备**：本机信息、最近设备网格/列表切换、添加设备、设备详情、删除记录。
 - **设置**：本机信息 / 连接设置 / 远程画面 / 安全验证 / 消息提醒五个分区，只展示实际生效的设置项。
 - **搜索与消息**：居中命令面板搜索本机与最近设备；右上角消息中心。
-- **会话窗口**：深色沉浸画布、悬浮工具栏、编码（H.264/JPEG）/FPS/RTT、画质切换、直接键盘输入、文本发送、剪贴板同步、截屏并复制、全屏、结束确认。
+- **会话窗口**：深色沉浸画布、悬浮工具栏、实际编码/FPS/RTT 与 P2P/TURN 路径、画质切换、直接键盘输入、文本发送、剪贴板同步、截屏并复制、全屏、结束确认。
 - **无账号、无登录、无广告**；设备身份与访问记录只保存在本机。
 
-### 远控内核（真实可用）
-- 被控端注册到中继：9 位识别码 + 6 位验证码，心跳与自动重连。
-- GDI 采集主屏（原生分辨率，32 位 DIB 直读 + BitBlt，避免 HALFTONE 缩放）→ **Media Foundation H.264 编码**（BGRA→NV12，CBR，无 B 帧、低延迟）或 libjpeg-turbo 4:4:4 JPEG 回退，后台 Isolate，不阻塞 UI。
-- 控制端在会话开始时自动协商 **H.264**：原生 Media Foundation 解码（独立 Isolate）→ BGRA → `ui.Image` 渲染；解码器不可用时自动回退 JPEG，Android 端保持 JPEG 兼容。
-- **有限 P2P**：Windows ↔ Windows 在同一局域网时，控制端先通过 UDP 7082 发现被控端，用验证码建立**完整直连会话**（视频、键鼠、控制、剪贴板），不依赖中继；直连不可达时才走中继。中继可用时，会话内还会通过 `control:p2p_offer` 交换直连地址，把视频切到直连；失败自动重试，断开回退中继并重建 IDR。会话栏显示“直连”或“中继”。
-- 另附原生采集加速模块 `app/windows/native/orbitlink_encoder`：优先使用 **Windows Graphics Capture**（D3D11 纹理直读）加速 JPEG 通路，系统未安装“屏幕捕获”组件时自动回退到 GDI 采集。
-- WebSocket 二进制帧传输，支持流畅 / 高清 / 超清画质与 5–30 FPS（流畅 1280px/62%、高清 1920px/85%、超清 1920px/92%）。
+### WebRTC 远控内核
+- 信令服务校验 9 位识别码与验证码，双方协商支持 WebRTC 后交换 session-bound SDP/ICE。
+- Windows 使用 `desktopCapturer.getSources` + `getDisplayMedia` 采集，H.264 优先协商，`RTCVideoRenderer` / `RTCVideoView` 显示视频。
+- ICE 使用本地 STUN/TURN 配置；优先直连，不可直连时使用 TURN。媒体不再经过 Dart WebSocket 的二进制帧通路，键鼠、文本、剪贴板经 DTLS/SCTP DataChannel。
+- 默认 30 FPS 上限、40 Mbps 码率上限、分辨率优先；实际帧率/码率由网络、采集变化与设备负载决定，不保证恒定 30 FPS。流畅档降低到 8 Mbps 上限。
+- 状态栏基于接收端 RTC stats 显示实际 FPS、RTT 与选中的 P2P/TURN 路径，不把信令已配对当作画面已连接。
+- Windows 保留与旧端的 H.264/JPEG 兼容路径；Android 被控端要求控制器支持 WebRTC。完整旧方案在 `main_ws`。
 - 控制端通过 `SendInput` / `SetCursorPos` 注入鼠标移动、按键、滚轮与键盘。会话画面会自动获取键盘焦点，支持字母、数字、符号、方向键、功能键与组合键；若焦点被对话框抢占，点击画面即可恢复。中文输入法请使用“发送文本”。
 - 单向剪贴板同步、中文文本发送；**截屏后自动复制到本机剪贴板**（同时提供 CF_DIB 与 PNG 格式，微信/QQ/浏览器可直接粘贴），并以 PNG 保存到 `图片\OrbitLink`。
 - 被控端顶部会话提醒，可随时结束协助。
-- 实测本机 1600×900 下 H.264 约 **25–27 FPS**、静态桌面约 **0.6–1 Mbps**；动态画面按画质档位提升，高清档 1600×900 目标约 12 Mbps、超清 2560×1440 最高约 **40 Mbps**。局域网延迟通常在 1–20 ms，H.264 与 4:4:4 JPEG 都能保持文字清晰。
+- 同机 WebRTC 验证已收到 1600×900 H.264 视频、DataChannel 输入与 PNG 剪贴板；同机镜像测试帧率会随负载变化，不能据此推算公网延迟。
 
 ### Android 双端
 - **控制端**：输入识别码/验证码连接；连接 Android 自动使用触控模式，连接 Windows 使用鼠标模式；支持文本、系统键、画质、剪贴板与最近设备。
-- **被控端**：前台服务 + `MediaProjection` 整屏采集 → JPEG → 中继；无障碍服务免 root 注入点击/滑动/长按/滚动/系统键/文本。
+- **被控端**：前台服务 + `ScreenCapturerAndroid` / `MediaProjection` 整屏轨道 → WebRTC；无障碍服务免 root 注入点击/滑动/长按/滚动/系统键/文本。授权期内复用一个 VirtualDisplay，空闲时不向编码器转发帧，停止服务时释放采集。
 - **互通**：Android ↔ Android、Android ↔ Windows，共用同一中继与设备身份协议。
 
 ### 中继服务
@@ -84,7 +87,7 @@
 双击 `start_relay.bat`，或：
 
 ```bat
-server\build\orbitlink-relay.exe
+server\build\orbitlink-signaling-webrtc.exe
 ```
 
 首次运行如弹出 Windows 防火墙提示，局域网使用请允许**专用网络**。默认监听 `0.0.0.0:7080`。
@@ -96,7 +99,10 @@ server\build\orbitlink-relay.exe
 - **被控端**：确保「允许协助」开启，把识别码和验证码告诉对方。
 - **控制端**：在「远程协助他人」输入识别码与验证码，点击 **连接**。
 - 跨网络连接时，控制端与被控端需使用同一个中继：**设置 → 连接设置**，例如 `ws://192.168.1.10:7080/ws`。
-- 同一局域网的 Windows ↔ Windows 会话会**优先完整直连，不需要中继**；会话栏显示“直连”或“中继”。若一直显示“中继”，在被控端以管理员身份运行 **`allow_p2p_firewall.bat`**，并确认网络配置文件不是“公用网络”。
+- `main` 即使在局域网也需要信令服务交换 SDP/ICE；视频与输入仍优先 P2P。旧的无信令 UDP 发现方案保留在 `main_ws`。
+- 双方在设置中分别填写自营 STUN/TURN 地址、TURN 用户名和密码。TURN 为空时，严格 NAT 下可能无法连接；不会悄悄回退为 WebSocket 视频。
+- 公网必须使用可信证书的 WSS 信令；TURN 支持 UDP/TCP 与 TURNS。开放 TURN 监听端口及所配置的 UDP relay 端口范围，并在 NAT 后配置公网映射地址。服务端需要身份认证、配额与访问控制，不能部署成开放中继。
+- TURN 凭据各自保存在本机，不放进 SDP 信令发给对端。Windows 配置下次会话生效；Android 被控端配置下次开启服务生效。
 
 Windows 客户端启动后会自动注册本机，不需要手动「开启被控」。
 
@@ -116,7 +122,16 @@ Windows 客户端启动后会自动注册本机，不需要手动「开启被控
 dart tools\relay_smoke.dart --id 123456789 --password abcdef
 ```
 
-脚本只收流、不注入输入，输出帧数、分辨率与配对结果。
+该脚本仅验证 Windows 旧帧协议兼容路径，不验证 WebRTC 或 TURN；Android 新被控端要求 WebRTC。
+
+信令协议回归请单独启动本地测试服务，避免影响正在使用的设备注册：
+
+```bat
+dart server\bin\server.dart --port 7088 --bind 127.0.0.1
+dart tools\rtc_signaling_smoke.dart ws://127.0.0.1:7088/ws
+```
+
+覆盖双方 RTC 能力组合、旧会话信令隔离、RTC 会话不转发二进制视频、结束后重连。该测试不包含 TURN 网络连通性。
 
 ---
 
@@ -138,6 +153,17 @@ adb install -r build\app\outputs\flutter-apk\app-release.apk
 ---
 
 ## 架构与协议
+
+### WebRTC（main）
+
+1. 被控端 `hello.meta.rtc=true`，控制端 `connect.rtc=true`；服务器仅在双方都支持时返回 `session_start.rtc=true`。
+2. 主机通过 `control:rtc_offer` 发送 SDP；控制端返回 `rtc_answer`，双方发送 `rtc_candidate`。每条信令携带当前 `session`，旧会话候选被丢弃，远端 SDP 就绪前候选排队。
+3. ICE 选路后建立 SRTP 视频与 `orbitlink-input` DataChannel，视频/输入不经过 WebSocket。信令 socket 保持心跳；断开会终止会话，结束消息同时释放服务器配对状态。
+4. Windows 与 Android 控制端共用 `packages/orbitlink_rtc`；Android 被控端在原生前台服务内管理屏幕轨道、PeerConnection 与 DataChannel。
+
+### 旧 WebSocket 兼容路径（main_ws 参考）
+
+下面的 GDI/MF、UDP 发现与 17 字节帧头不用于新 WebRTC 会话。
 
 ```
 ┌──────────────────────── 控制端 Flutter ────────────────────────┐
@@ -231,7 +257,7 @@ docker run -d --name orbitlink-relay \
 ```bat
 :: 中继
 cd server
-dart compile exe bin\server.dart -o build\orbitlink-relay.exe
+dart compile exe bin\server.dart -o build\orbitlink-signaling-webrtc.exe
 
 :: Windows 客户端（CMake 会自动编译原生媒体模块 orbitlink_encoder.dll）
 cd ..\app
@@ -250,9 +276,11 @@ flutter build apk --release
 构建产物：
 - 客户端：`app\build\windows\x64\runner\Release\orbitlink.exe`
 - H.264 编解码与采集加速：`app\build\windows\x64\runner\Release\orbitlink_encoder.dll`（缺失时自动回退 JPEG）
-- 中继：`server\build\orbitlink-relay.exe`
+- 中继：`server\build\orbitlink-signaling-webrtc.exe`
 - APK：`mobile\build\app\outputs\flutter-apk\app-release.apk`
-- Windows 发布包：`dist\OrbitLink-Windows-x64.zip`
+- Windows WebRTC 测试包：`dist\OrbitLink-WebRTC-Windows-x64.zip`，包含客户端及新版 `orbitlink-relay.exe`
+- Android WebRTC 测试包：`dist\OrbitLink-WebRTC-Android.apk`
+- 旧 WebSocket 包保留在 `dist\OrbitLink-Windows-x64.zip`，与新包分开，不要混用旧信令程序。
 
 > **VS 2026 兼容说明**：Flutter 3.24.5 默认只识别 VS 2019/2022。本机使用 VS Build Tools 2026（v18）时，已修改本机 Flutter SDK 的
 > `packages/flutter_tools/lib/src/windows/visual_studio.dart`，增加 `18 => 'Visual Studio 18 2026'` 并重建 tool 快照。
@@ -276,8 +304,9 @@ OrbitLink/
 │  ├─ lib/                           控制端会话、移动 UI、桥接
 │  ├─ android/.../orbitlink/remote/  HostService / MediaProjection / Accessibility
 │  └─ README.md                      Android 构建、权限与验收说明
+├─ packages/orbitlink_rtc/            双端共享的 RTC 视频、输入、ICE 与统计
 ├─ server/
-│  ├─ bin/server.dart                中继服务器源码
+│  ├─ bin/server.dart                信令与旧帧协议兼容服务器源码
 │  ├─ Dockerfile                     多阶段构建（Dart AOT + Debian slim）
 │  └─ build/orbitlink-relay.exe      已编译的 Windows 服务器
 ├─ tools/relay_smoke.dart            无界面链路自检
@@ -297,7 +326,8 @@ OrbitLink/
 ## 本机数据与安全
 
 - Windows 数据目录：`%APPDATA%\OrbitLink\config.json`（设备身份、设置、最近设备、最近一次连接的目标与验证码）。
-- 画面参数默认 1920 px / 85% / 30 FPS（4:4:4）；旧配置会自动升级到该档位。
+- WebRTC 默认 30 FPS、40 Mbps 上限，实际自适应；设置中的 JPEG 质量/宽度属于旧兼容路径。
+- TURN 密码、设备验证码保存在应用本地配置中，不应提交、分享或打包这些配置文件。
 - 最近一次连接信息会在下次打开客户端时自动填入，便于直接重连；删除该文件可移除保存内容。
 - 可通过环境变量 `ORBITLINK_DATA_DIR` 指定其他目录。
 - Android 数据：应用私有 `SharedPreferences`（`orbitlink_host`）与 `files/recents.json`。
@@ -309,21 +339,25 @@ OrbitLink/
 
 ## 已知限制
 
-1. **有限 P2P**：同一局域网的 Windows ↔ Windows 可以完整直连（UDP 发现 + 验证码鉴权），不依赖中继；跨网段/严格 NAT 仍走中继，不做打洞。中继会话内的视频直连只承载视频，键鼠仍走中继。
-2. **WebSocket 明文、验证码由中继校验**：局域网直连的验证码也通过 `ws://` 传输，安全边界与中继一致，仅建议用于可信环境；公网必须使用 WSS/TLS 与访问控制。
-3. **H.264 使用软件编码**：当前走 Media Foundation 的 Microsoft H.264 Encoder MFT（CPU NV12），1600×900 实测 25–27 FPS；超清档 1080p 在高负载 CPU 上可能低于 30 FPS，硬件编码器/零拷贝路径尚未接入。已采用画质优先的高码率策略（上限 40 Mbps），复杂动态画面会占用较多带宽；无音频、无多屏切换；独占全屏/硬件覆盖层可能采集为黑屏。
-4. **H.264 与 WGC 尚未合并**：H.264 通路使用 GDI 采集（兼容所有 Windows 版本）；Windows Graphics Capture 目前只加速 JPEG 通路。WGC 需要系统“屏幕捕获”组件，本机 Win10 未安装，会自动回退 GDI。
-5. **Android 仍为 JPEG**：Android 控制端不请求 H.264，Android 被控端也仍推 JPEG；未接入 MediaCodec。P2P 视频仅限 Windows ↔ Windows，其余组合保持中继 + JPEG 兼容。
+1. **信令仍必需**：WebRTC 会话建立依赖同一信令服务；P2P 指媒体和输入直连，不代表无需信令。未配置可用 TURN 时严格 NAT 可能连接失败。
+2. **信令信任边界**：验证码与 SDP 由信令服务处理，公网必须 WSS/TLS 与访问控制。WebRTC 的 DTLS/SRTP 不替代信令身份认证，也没有独立的人工指纹核验。
+3. **实际性能自适应**：30 FPS 和 40 Mbps 是配置上限，不是帧率或码率承诺。WebRTC 自行选择可用编解码器与实现，不能假定所有设备都硬件加速或零拷贝。
+4. **部署尚待公网验收**：本仓库不提供 TURN 服务；需自行配置监听/relay 端口、公网地址、证书、认证和配额。真实 NAT、UDP 封锁、TURN TCP/TLS 回退及长时稳定性需要部署后测试。
+5. **没有音频与多屏切换**：当前仅屏幕视频与输入；受保护内容、安全桌面、部分硬件覆盖层可能黑屏。
 6. **部分会话工具仍是占位**：远程文件传输、文件闪传、语音聊天、隐私屏等尚未接入。
 7. **Windows UIPI**：普通权限进程无法向管理员权限窗口注入输入，需要以相同权限运行。
 8. **同机测试光标回环**：两端共享物理光标时会出现追尾与镜像，属于预期，请用两台设备体验。
 9. **Windows 锁屏**：桌面处于锁屏/安全桌面时 GDI 采集会被系统阻止。
-10. **Android 限制**：每次开启被控都要重新授权 MediaProjection；Android 14+ 复用单个 VirtualDisplay；分辨率在本次被控启动时固定；免 root 输入依赖无障碍服务，只能对焦点输入框注入文本；模拟器约 3–10 FPS。
-11. **防火墙与 AP 隔离**：局域网完全直连需要被控端允许入站 UDP 7082（发现）和直连 TCP 端口；以管理员身份运行 `allow_p2p_firewall.bat`，并把网络设为“专用网络”或“域网络”。Wi-Fi AP 隔离/访客网络与跨 VLAN 会阻止直连，此时如果中继可用会自动回退中继；中继也不可用时连接会失败。Docker 部署需放行宿主机映射端口。
+10. **Android 限制**：每次开启被控需重新授权 MediaProjection；授权期内复用一个 VirtualDisplay，旋转通过调整采集尺寸处理。输入依赖用户开启无障碍服务，文本需要远端焦点输入框。系统撤销授权即停止被控。
+11. **防火墙与 AP 隔离**：WebRTC 使用动态 ICE UDP 端口，受 AP 隔离/防火墙阻止时需要可用 TURN。旧 UDP 7082 发现端口不是 WebRTC 的媒体端口；信令容器与 TURN 是独立服务。
 
 ---
 
 ## 验证记录
+
+WebRTC 本轮：Windows 双实例与浏览器互操作已收到 H.264 1600×900，DataChannel 完成点击/文本/Enter 与 ping/pong，截图可复制到剪贴板；Android 模拟器与原生 Windows 双向视频均显示 P2P（Android 被控协商 VP8），Windows 远程点击手机设置页、横竖屏旋转、停止被控后 MediaProjection 释放与对端结束提示通过；Android Release 构建及 71 项 Dart 回归测试通过。真实公网 NAT、外部 TURN/TURNS、丢包与长时间运行仍需部署环境验收，不能以本机测试替代。
+
+以下为迁移前 `main_ws` 的历史验证，性能数值不代表当前 WebRTC：
 
 - Windows：同一台机器双实例经本机中继完成 H.264 会话——1600×900、25–27 FPS、RTT 1 ms、静态桌面 0.6–1 Mbps，连续 3 次会话稳定；JPEG 回退 25 FPS。原生编解码回环 PSNR 37.7 dB，编码约 5.7 ms/帧、解码约 7.4 ms/帧（含 NV12↔BGRA）。
 - P2P：Windows 双实例自动建立局域网直连，7 秒会话中 180/181 帧走直连；主动断开直连后 96 帧自动回退中继并收到新的 IDR；禁用直连时 172 帧全部经中继。真实控制端会话栏显示“直连 · H.264”。

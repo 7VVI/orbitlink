@@ -16,7 +16,13 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final TextEditingController _relay = TextEditingController();
+  final TextEditingController _stunUrl = TextEditingController();
+  final TextEditingController _turnUrl = TextEditingController();
+  final TextEditingController _turnUsername = TextEditingController();
+  final TextEditingController _turnCredential = TextEditingController();
   String? _lastRelay;
+  (String, String, String, String)? _lastRtc;
+  bool _savingRtc = false;
 
   @override
   void didChangeDependencies() {
@@ -26,11 +32,28 @@ class _SettingsPageState extends State<SettingsPage> {
       _lastRelay = config.relayUrl;
       _relay.text = config.relayUrl;
     }
+    final rtc = (
+      config.stunUrl,
+      config.turnUrl,
+      config.turnUsername,
+      config.turnCredential,
+    );
+    if (rtc != _lastRtc) {
+      _lastRtc = rtc;
+      _stunUrl.text = config.stunUrl;
+      _turnUrl.text = config.turnUrl;
+      _turnUsername.text = config.turnUsername;
+      _turnCredential.text = config.turnCredential;
+    }
   }
 
   @override
   void dispose() {
     _relay.dispose();
+    _stunUrl.dispose();
+    _turnUrl.dispose();
+    _turnUsername.dispose();
+    _turnCredential.dispose();
     super.dispose();
   }
 
@@ -49,7 +72,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final statusText = status.sessionActive
         ? '被控中'
         : status.relay == 'online'
-            ? '中继在线'
+            ? '信令在线'
             : status.running
                 ? '连接中'
                 : '未开启';
@@ -113,8 +136,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ),
                 SectionCard(
-                  title: '中继服务器',
-                  subtitle: '被控端与控制端必须连接同一个中继',
+                  title: '信令服务器（WS / WSS）',
+                  subtitle: '两端须连接同一信令服务；局域网也需要信令',
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -152,8 +175,44 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                       const SizedBox(height: 10),
                       const Text(
-                        '模拟器使用 ws://10.0.2.2:7080/ws；真机使用电脑局域网 IP。',
+                        'WS / WSS 仅用于信令。模拟器可用 ws://10.0.2.2:7080/ws；'
+                        '真机填写实际信令服务地址，公网推荐 WSS 与可信证书。'
+                        '保存不停止当前会话；被控服务运行时，新地址下次开启生效。',
                         style: AppText.caption,
+                      ),
+                    ],
+                  ),
+                ),
+                SectionCard(
+                  title: 'WebRTC 连接（STUN / TURN）',
+                  subtitle: '优先 UDP 直连，不通时通过 TURN 中转',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _rtcField('STUN URL', _stunUrl, hint: '留空关闭 STUN'),
+                      _rtcField('TURN URL', _turnUrl, hint: '留空关闭 TURN'),
+                      _rtcField('TURN 用户名', _turnUsername, hint: '启用 TURN 时必填'),
+                      _rtcField('TURN 密码', _turnCredential,
+                          hint: '启用 TURN 时必填', obscure: true),
+                      const Text(
+                        '支持 stun: / stuns: / turn: / turns: 标准地址、[IPv6]，'
+                        '以及 ?transport=udp 或 ?transport=tcp。'
+                        '公网推荐 TURNS 与可信证书，请填写实际部署的 TURN 服务。'
+                        '留空关闭对应服务可能降低跨网络连接成功率。',
+                        style: AppText.caption,
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        '双方使用各自本地配置，TURN 凭据不发送给对端。'
+                        '保存不打断当前会话：控制端下次会话、被控端下次开启服务生效，'
+                        '不会自动停止服务。',
+                        style: AppText.caption,
+                      ),
+                      const SizedBox(height: 14),
+                      FilledButton(
+                        onPressed:
+                            _savingRtc ? null : () => _saveRtc(controller),
+                        child: Text(_savingRtc ? '正在保存' : '保存 RTC 配置'),
                       ),
                     ],
                   ),
@@ -232,13 +291,22 @@ class _SettingsPageState extends State<SettingsPage> {
                       _AboutRow(label: '版本', value: '1.0.0'),
                       SizedBox(height: 8),
                       _AboutRow(
-                          label: '协议', value: 'OrbitLink WebSocket 中继 / JPEG'),
+                          label: '协议', value: 'WebRTC / SRTP + DataChannel'),
+                      SizedBox(height: 8),
+                      _AboutRow(label: '信令', value: 'WS / WSS（公网推荐 WSS）'),
                       SizedBox(height: 8),
                       _AboutRow(label: '支持', value: 'Android 7.0+（API 24）'),
                       SizedBox(height: 12),
                       Text(
-                        '星轨远控不依赖账号或云服务，设备身份与访问记录只保存在本机。'
-                        '远程会话需要对方验证码授权，屏幕仅在连接期间采集。',
+                        '无需账号。每次开启本机被控都需要用户确认系统屏幕共享授权，'
+                        '远程连接需要验证码，请只向信任的人提供。'
+                        '连接仍依赖信令服务，传输保护不能替代对对端和服务器的信任。',
+                        style: AppText.caption,
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'WebRTC 当前为 30 FPS、40 Mbps 高码率配置，清晰度优先。'
+                        '控制端保留旧 JPEG 兼容模式；JPEG 质量与最大宽度不影响 WebRTC。',
                         style: AppText.caption,
                       ),
                     ],
@@ -250,6 +318,46 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
+  }
+
+  Widget _rtcField(String label, TextEditingController field,
+      {required String hint, bool obscure = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: AppText.caption),
+          const SizedBox(height: 6),
+          Semantics(
+            label: label,
+            child: AppTextField(
+              key: ValueKey(label),
+              controller: field,
+              hint: hint,
+              obscure: obscure,
+              keyboardType:
+                  obscure ? TextInputType.visiblePassword : TextInputType.text,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _saveRtc(MobileController controller) async {
+    setState(() => _savingRtc = true);
+    try {
+      await controller.saveRtcSettings(
+        stunUrl: _stunUrl.text,
+        turnUrl: _turnUrl.text,
+        turnUsername: _turnUsername.text,
+        turnCredential: _turnCredential.text,
+      );
+      if (mounted) FocusScope.of(context).unfocus();
+    } finally {
+      if (mounted) setState(() => _savingRtc = false);
+    }
   }
 
   Future<void> _resetIdentity(MobileController controller) async {

@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../core/host_bridge.dart';
 import '../../core/mobile_scope.dart';
@@ -25,6 +26,7 @@ class _SessionPageState extends State<SessionPage> {
   ControllerSession get session => widget.session;
 
   ui.Image? _image;
+  RTCVideoRenderer? _renderer;
   bool _decoding = false;
   int _decodedSeq = -1;
   int? _queuedSeq;
@@ -52,6 +54,9 @@ class _SessionPageState extends State<SessionPage> {
     session.peerPlatform.addListener(_onPlatformChanged);
     session.stats.addListener(_onChanged);
     session.latestFrame.addListener(_onFrame);
+    session.renderer.addListener(_onRendererChanged);
+    session.transport.addListener(_onChanged);
+    _onRendererChanged();
     _enterImmersive();
     _applyPlatform(session.peerPlatform.value);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -93,7 +98,16 @@ class _SessionPageState extends State<SessionPage> {
     if (mounted) setState(() {});
   }
 
+  void _onRendererChanged() {
+    _renderer?.removeListener(_onChanged);
+    _renderer = session.renderer.value;
+    // Includes resolution and rotation changes; input uses the same contain rect.
+    _renderer?.addListener(_onChanged);
+    _onChanged();
+  }
+
   void _onFrame() {
+    if (!mounted || session.isRtc) return;
     final frame = session.latestFrame.value;
     if (frame == null || frame.seq == _decodedSeq) return;
     if (_decoding) {
@@ -117,7 +131,7 @@ class _SessionPageState extends State<SessionPage> {
       final codec = await ui.instantiateImageCodec(frame.jpeg);
       final info = await codec.getNextFrame();
       codec.dispose();
-      if (!mounted) {
+      if (!mounted || session.isRtc) {
         info.image.dispose();
         return;
       }
@@ -150,6 +164,9 @@ class _SessionPageState extends State<SessionPage> {
     session.peerPlatform.removeListener(_onPlatformChanged);
     session.stats.removeListener(_onChanged);
     session.latestFrame.removeListener(_onFrame);
+    session.renderer.removeListener(_onRendererChanged);
+    session.transport.removeListener(_onChanged);
+    _renderer?.removeListener(_onChanged);
     _longPressTimer?.cancel();
     _image?.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -160,6 +177,24 @@ class _SessionPageState extends State<SessionPage> {
 
   bool get _connected => session.state.value == ControllerState.connected;
   bool get _androidTarget => session.peerPlatform.value == 'android';
+
+  String get _transportLabel {
+    if (!session.isRtc) return 'WS';
+    if (!_connected) return 'WebRTC';
+    return switch (session.transport.value) {
+      'direct' => 'P2P',
+      'turn' => 'TURN',
+      _ => 'WebRTC',
+    };
+  }
+
+  String get _connectionLabel {
+    if (session.state.value == ControllerState.failed) return '连接失败';
+    if (session.state.value == ControllerState.ended) return '会话已结束';
+    if (session.state.value == ControllerState.ringing) return '等待对方接受…';
+    if (session.waitingForFrame) return '正在接收画面…';
+    return session.isRtc ? '正在建立 WebRTC 连接…' : '正在建立远程会话…';
+  }
 
   Future<void> _confirmEnd() async {
     if (_ending) return;
@@ -246,7 +281,15 @@ class _SessionPageState extends State<SessionPage> {
           onPointerCancel: (event) => _onPointerUp(event, rect),
           child: Stack(
             children: [
-              if (image != null)
+              if (session.isRtc && _renderer != null)
+                Positioned.fill(
+                  child: RTCVideoView(
+                    _renderer!,
+                    objectFit:
+                        RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                  ),
+                )
+              else if (!session.isRtc && image != null)
                 Positioned(
                   left: rect.left,
                   top: rect.top,
@@ -257,14 +300,22 @@ class _SessionPageState extends State<SessionPage> {
                     fit: BoxFit.fill,
                     filterQuality: FilterQuality.medium,
                   ),
-                )
-              else
+                ),
+              if (session.isRtc ? !_connected : image == null)
                 const Center(
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white70),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white70),
+                      ),
+                      SizedBox(height: 12),
+                      Text('正在接收画面…',
+                          style: TextStyle(color: AppColors.sessionMuted)),
+                    ],
                   ),
                 ),
               if (_touchMode && _connected)
@@ -281,9 +332,22 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Rect _imageRect(ui.Image? image, Size size) {
-    if (image == null) return Rect.zero;
-    final iw = image.width.toDouble();
-    final ih = image.height.toDouble();
+    final video = _renderer;
+    final double iw;
+    final double ih;
+    if (session.isRtc) {
+      if (video == null || video.videoWidth <= 0 || video.videoHeight <= 0) {
+        return Rect.zero;
+      }
+      // RTCVideoValue.aspectRatio accounts for 90/270-degree rotation, exactly
+      // as RTCVideoView does. Raw track dimensions alone give incorrect taps.
+      iw = video.value.aspectRatio;
+      ih = 1;
+    } else {
+      if (image == null) return Rect.zero;
+      iw = image.width.toDouble();
+      ih = image.height.toDouble();
+    }
     if (iw <= 0 || ih <= 0) return Rect.zero;
     final scale = math.min(size.width / iw, size.height / ih);
     final dw = iw * scale;
@@ -488,22 +552,22 @@ class _SessionPageState extends State<SessionPage> {
                               : platformLabel(session.peerPlatform.value),
                           color: AppColors.sessionMuted,
                         ),
-                        if (_connected) ...[
-                          const SizedBox(width: 8),
-                          StatusText(
-                            text: '${stats.fps} FPS',
-                            color: AppColors.sessionMuted,
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            _connected
+                                ? '$_transportLabel · ${stats.fps} FPS · '
+                                    '${stats.kbps} kbps · ${stats.latencyMs} ms'
+                                : _connectionLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: AppColors.sessionMuted,
+                              height: 1.2,
+                            ),
                           ),
-                          const SizedBox(width: 8),
-                          StatusText(
-                            text: '${stats.latencyMs} ms',
-                            color: AppColors.sessionMuted,
-                          ),
-                        ] else
-                          const StatusText(
-                            text: '正在连接…',
-                            color: AppColors.sessionMuted,
-                          ),
+                        ),
                       ],
                     ),
                   ],
@@ -622,9 +686,7 @@ class _SessionPageState extends State<SessionPage> {
                 ),
                 const SizedBox(height: 18),
                 Text(
-                  session.state.value == ControllerState.ringing
-                      ? '等待对方接受…'
-                      : '正在建立远程会话…',
+                  _connectionLabel,
                   style: const TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w600,
@@ -910,7 +972,8 @@ class _SessionPageState extends State<SessionPage> {
               leading: const Icon(Icons.speed_outlined),
               title: const Text('画面与延迟'),
               subtitle: Text(
-                '${stats.width}×${stats.height}  ·  ${stats.fps} FPS  ·  ${stats.latencyMs} ms',
+                '$_transportLabel  ·  ${stats.width}×${stats.height}  ·  '
+                '${stats.fps} FPS  ·  ${stats.kbps} kbps  ·  ${stats.latencyMs} ms',
               ),
             ),
             ListTile(

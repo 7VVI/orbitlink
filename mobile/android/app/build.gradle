@@ -46,4 +46,6 @@ flutter {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Exactly the org.webrtc SDK used by flutter_webrtc 0.12.7; one native library version.
+    implementation("io.github.webrtc-sdk:android:125.6422.03")
 }

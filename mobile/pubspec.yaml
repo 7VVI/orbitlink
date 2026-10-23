@@ -13,6 +13,9 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   web_socket_channel: ^3.0.1
+  flutter_webrtc: 0.12.7
+  orbitlink_rtc:
+    path: ../packages/orbitlink_rtc
 
 dev_dependencies:
   flutter_test:

@@ -564,12 +564,11 @@ class _Header extends StatelessWidget {
       'error' => AppColors.danger,
       _ => AppColors.textTertiary,
     };
-    final label = switch (status.relay) {
-      'online' => '中继在线',
-      'connecting' => '连接中',
-      'error' => '中继异常',
-      _ => '未开启',
-    };
+    final label = status.sessionActive
+        ? '被控中'
+        : running
+            ? '等待连接'
+            : '未开启';
     return Container(
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 20),

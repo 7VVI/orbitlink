@@ -36,12 +36,7 @@ class SettingsPage extends StatelessWidget {
                   children: [
                     SizedBox(width: 222, child: _SettingsNav()),
                     SizedBox(width: 20),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        padding: EdgeInsets.only(bottom: 30),
-                        child: _SettingsContent(),
-                      ),
-                    ),
+                    Expanded(child: _SettingsBody()),
                   ],
                 ),
               ),
@@ -181,7 +176,8 @@ class _NavItem extends StatelessWidget {
         onTap: onTap,
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 130),
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
           height: 40,
           margin: const EdgeInsets.only(bottom: 2),
           padding: const EdgeInsets.symmetric(horizontal: 11),
@@ -195,31 +191,45 @@ class _NavItem extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(
-                icon,
-                size: 17,
-                color: selected ? AppColors.primary : AppColors.textMuted,
+              TweenAnimationBuilder<Color?>(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                tween: ColorTween(
+                  end: selected ? AppColors.primary : AppColors.textMuted,
+                ),
+                builder: (context, color, _) =>
+                    Icon(icon, size: 17, color: color),
               ),
               const SizedBox(width: 10),
-              Text(
-                label,
+              AnimatedDefaultTextStyle(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
                 style: TextStyle(
                   fontSize: 13.5,
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
                   color: selected ? AppColors.primary : AppColors.textSecondary,
                 ),
+                child: Text(label),
               ),
-              if (selected) ...[
-                const Spacer(),
-                Container(
-                  width: 5,
-                  height: 5,
-                  decoration: const BoxDecoration(
-                    color: AppColors.primary,
-                    shape: BoxShape.circle,
+              const Spacer(),
+              AnimatedOpacity(
+                opacity: selected ? 1 : 0,
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                child: AnimatedScale(
+                  scale: selected ? 1 : 0.6,
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  child: Container(
+                    width: 5,
+                    height: 5,
+                    decoration: const BoxDecoration(
+                      color: AppColors.primary,
+                      shape: BoxShape.circle,
+                    ),
                   ),
                 ),
-              ],
+              ),
             ],
           ),
         ),
@@ -228,19 +238,74 @@ class _NavItem extends StatelessWidget {
   }
 }
 
-class _SettingsContent extends StatelessWidget {
-  const _SettingsContent();
+class _SettingsBody extends StatefulWidget {
+  const _SettingsBody();
+
+  @override
+  State<_SettingsBody> createState() => _SettingsBodyState();
+}
+
+class _SettingsBodyState extends State<_SettingsBody> {
+  final ScrollController _scroll = ScrollController();
+  SettingsTab? _tab;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final tab = AppScope.of(context).settingsTab;
+    if (_tab != null && _tab != tab && _scroll.hasClients) {
+      // Reusing the previous tab's offset clips the first card and leaves its
+      // shadow stranded at the top of the viewport.
+      _scroll.jumpTo(0);
+    }
+    _tab = tab;
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  Widget _page(SettingsTab tab) => switch (tab) {
+        SettingsTab.info => const _InfoPage(),
+        SettingsTab.general => const _ConnectionPage(),
+        SettingsTab.desktop => const _DesktopPage(),
+        SettingsTab.security => const _SecurityPage(),
+        SettingsTab.notification => const _NotificationPage(),
+      };
 
   @override
   Widget build(BuildContext context) {
-    final controller = AppScope.of(context);
-    return switch (controller.settingsTab) {
-      SettingsTab.info => const _InfoPage(),
-      SettingsTab.general => const _ConnectionPage(),
-      SettingsTab.desktop => const _DesktopPage(),
-      SettingsTab.security => const _SecurityPage(),
-      SettingsTab.notification => const _NotificationPage(),
-    };
+    final tab = AppScope.of(context).settingsTab;
+    return SingleChildScrollView(
+      controller: _scroll,
+      padding: const EdgeInsets.only(top: 2, bottom: 30),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 170),
+        reverseDuration: const Duration(milliseconds: 110),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          final position = Tween<Offset>(
+            begin: const Offset(0, 0.012),
+            end: Offset.zero,
+          ).animate(animation);
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(position: position, child: child),
+          );
+        },
+        layoutBuilder: (current, previous) => Stack(
+          alignment: Alignment.topCenter,
+          children: [
+            for (final child in previous) IgnorePointer(child: child),
+            if (current != null) current,
+          ],
+        ),
+        child: KeyedSubtree(key: ValueKey(tab), child: _page(tab)),
+      ),
+    );
   }
 }
 
@@ -480,18 +545,31 @@ class _ConnectionPage extends StatefulWidget {
 
 class _ConnectionPageState extends State<_ConnectionPage> {
   late final TextEditingController _url;
+  late final TextEditingController _stunUrl;
+  late final TextEditingController _turnUrl;
+  late final TextEditingController _turnUsername;
+  late final TextEditingController _turnCredential;
   late final AppController _controller;
 
   @override
   void initState() {
     super.initState();
     _controller = AppScope.read(context);
-    _url = TextEditingController(text: _controller.settings.relayUrl);
+    final settings = _controller.settings;
+    _url = TextEditingController(text: settings.relayUrl);
+    _stunUrl = TextEditingController(text: settings.stunUrl);
+    _turnUrl = TextEditingController(text: settings.turnUrl);
+    _turnUsername = TextEditingController(text: settings.turnUsername);
+    _turnCredential = TextEditingController(text: settings.turnCredential);
   }
 
   @override
   void dispose() {
     _url.dispose();
+    _stunUrl.dispose();
+    _turnUrl.dispose();
+    _turnUsername.dispose();
+    _turnCredential.dispose();
     super.dispose();
   }
 
@@ -515,11 +593,11 @@ class _ConnectionPageState extends State<_ConnectionPage> {
       children: [
         const _ContentHeading(
           title: '连接设置',
-          subtitle: '跨网络连接时需使用同一个中继；同一局域网会优先直连，不依赖中继。',
+          subtitle: '两端连接同一信令服务；WebRTC 优先 UDP 直连，不通时通过 TURN 中转。',
         ),
         _Section(
-          title: '中继服务器',
-          subtitle: '修改地址后会立即断开并重新注册本机。',
+          title: '信令服务器（WS / WSS）',
+          subtitle: 'WS / WSS 仅用于信令，局域网也需要信令。修改后需重连并重新注册本机。',
           children: [
             Row(
               children: [
@@ -572,22 +650,48 @@ class _ConnectionPageState extends State<_ConnectionPage> {
           ],
         ),
         const SizedBox(height: 16),
+        _Section(
+          title: 'WebRTC 连接（STUN / TURN）',
+          subtitle: '仅用于本机，双方独立配置；保存不打断当前会话，下次会话生效。',
+          children: [
+            _rtcField('STUN URL', _stunUrl, hint: '留空关闭 STUN'),
+            _rtcField('TURN URL', _turnUrl, hint: '留空关闭 TURN'),
+            _rtcField('TURN 用户名', _turnUsername, hint: '启用 TURN 时必填'),
+            _rtcField('TURN 密码', _turnCredential,
+                hint: '启用 TURN 时必填', obscure: true),
+            const Text(
+              '支持 stun: / stuns: / turn: / turns: 标准地址、[IPv6]，'
+              '以及 ?transport=udp 或 ?transport=tcp。用户名与密码分开填写。',
+              style: AppText.hint,
+            ),
+            const SizedBox(height: 14),
+            PrimaryButton(
+              label: '保存 RTC 配置',
+              width: 132,
+              height: 38,
+              onPressed: _saveRtc,
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
         const _Section(
           title: '连接说明',
           children: [
             _InfoLine(
               icon: Icons.lan_outlined,
-              text: '局域网内填写运行中继服务的电脑 IP，例如 ws://192.168.1.10:7080/ws。',
+              text: '局域网内填写信令服务的电脑 IP，例如 ws://192.168.1.10:7080/ws。'
+                  'STUN 辅助发现直连路径；关闭 STUN / TURN 可能降低跨网络连接成功率。',
             ),
             SizedBox(height: 12),
             _InfoLine(
               icon: Icons.cloud_outlined,
-              text: '跨网络使用时，请将中继服务部署在公网服务器，并开放对应端口。',
+              text: '公网推荐 WSS 信令与 TURNS，并使用可信证书。'
+                  'TURN 需填写实际部署的服务地址与凭据；本页不会部署服务器。',
             ),
             SizedBox(height: 12),
             _InfoLine(
               icon: AppIcons.lock,
-              text: '所有远程会话都需要对方输入本机验证码。',
+              text: '远程连接需要本机验证码。TURN 凭据仅供本机连接 TURN 使用，不发送给对端。',
             ),
           ],
         ),
@@ -595,15 +699,146 @@ class _ConnectionPageState extends State<_ConnectionPage> {
     );
   }
 
-  void _save() {
+  Widget _rtcField(String label, TextEditingController field,
+      {required String hint, bool obscure = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: AppText.label),
+          const SizedBox(height: 7),
+          Semantics(
+            label: label,
+            child: AppTextField(
+              key: ValueKey(label),
+              controller: field,
+              hint: hint,
+              obscure: obscure,
+              keyboardType:
+                  obscure ? TextInputType.visiblePassword : TextInputType.text,
+              onSubmitted: (_) => _saveRtc(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _save() async {
     final value = _url.text.trim();
-    if (value.isEmpty) {
-      _controller.showToast('请输入中继服务器地址');
+    final error = validateRelayUrl(value);
+    if (error != null) {
+      _controller.showToast(error);
       return;
     }
+    if (value == _controller.settings.relayUrl) {
+      _controller.showToast('信令地址未变更');
+      return;
+    }
+    if (_controller.session != null || _controller.host.session.value != null) {
+      final confirmed = await showConfirmDialog(
+        context,
+        title: '保存信令地址并重连',
+        message: '重连信令可能中断当前会话。仅修改 STUN / TURN 请使用「保存 RTC 配置」。',
+        confirmText: '保存并重连',
+      );
+      if (!confirmed || !mounted) return;
+    }
     _controller.setRelayUrl(value);
-    _controller.showToast('中继地址已保存，正在重新连接');
+    _controller.showToast('信令地址已保存，正在重新连接');
   }
+
+  void _saveRtc() {
+    final error = validateRtcSettings(
+      stunUrl: _stunUrl.text,
+      turnUrl: _turnUrl.text,
+      turnUsername: _turnUsername.text,
+      turnCredential: _turnCredential.text,
+    );
+    if (error != null) {
+      _controller.showToast(error);
+      return;
+    }
+    _controller.updateSettings((settings) {
+      settings.stunUrl = _stunUrl.text.trim();
+      settings.turnUrl = _turnUrl.text.trim();
+      settings.turnUsername = _turnUsername.text.trim();
+      settings.turnCredential = _turnCredential.text;
+    });
+    _controller.showToast('RTC 配置已保存，下次会话生效；当前会话不会中断');
+  }
+}
+
+// Keep the settings boundary strict without treating ICE URLs as HTTP URLs.
+String? validateRelayUrl(String value) {
+  final url = value.trim();
+  final match =
+      RegExp(r'^wss?://([^/?#]+)(?:[/?][^#]*)?$', caseSensitive: false)
+          .firstMatch(url);
+  if (match == null ||
+      RegExp(r'[\s\x00-\x1f\x7f\\]').hasMatch(url) ||
+      RegExp(r'%(?![0-9a-fA-F]{2})').hasMatch(url) ||
+      !_isValidServerAddress(match.group(1)!) ||
+      Uri.tryParse(url) == null) {
+    return '请输入有效的 ws:// 或 wss:// 信令地址（主机及端口需有效）';
+  }
+  return null;
+}
+
+String? validateRtcSettings({
+  required String stunUrl,
+  required String turnUrl,
+  required String turnUsername,
+  required String turnCredential,
+}) {
+  if (!_isValidIceUrl(stunUrl.trim(), isTurn: false)) {
+    return 'STUN URL 无效，请使用 stun: 或 stuns: 地址，或留空关闭';
+  }
+  if (!_isValidIceUrl(turnUrl.trim(), isTurn: true)) {
+    return 'TURN URL 无效，请使用 turn: 或 turns: 地址，或留空关闭';
+  }
+  if (turnUrl.trim().isNotEmpty &&
+      (turnUsername.trim().isEmpty || turnCredential.trim().isEmpty)) {
+    return '启用 TURN 时必须填写 TURN 用户名和密码';
+  }
+  return null;
+}
+
+bool _isValidIceUrl(String value, {required bool isTurn}) {
+  if (value.isEmpty) return true;
+  final match = RegExp(
+    r'^(stun|stuns|turn|turns):([^?]+)(?:\?transport=(udp|tcp))?$',
+    caseSensitive: false,
+  ).firstMatch(value);
+  if (match == null || RegExp(r'[\s\x00-\x1f\x7f]').hasMatch(value)) {
+    return false;
+  }
+  final scheme = match.group(1)!.toLowerCase();
+  return (isTurn ? scheme.startsWith('turn') : scheme.startsWith('stun')) &&
+      _isValidServerAddress(match.group(2)!);
+}
+
+bool _isValidServerAddress(String value) {
+  final match = RegExp(
+    r'^(?:\[([0-9a-fA-F:.]+)\]|([^:\[\]/?#@\\]+))(?::([0-9]+))?$',
+  ).firstMatch(value);
+  if (match == null) return false;
+  final portText = match.group(3);
+  if (portText != null) {
+    final port = int.tryParse(portText);
+    if (port == null || port < 1 || port > 65535) return false;
+  }
+  final ipv6 = match.group(1);
+  if (ipv6 != null) {
+    return InternetAddress.tryParse(ipv6)?.type == InternetAddressType.IPv6;
+  }
+  final host = match.group(2)!;
+  if (InternetAddress.tryParse(host) != null) return true;
+  if (RegExp(r'^[0-9.]+$').hasMatch(host)) return false;
+  final domain = host.endsWith('.') ? host.substring(0, host.length - 1) : host;
+  final label = RegExp(r'^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$');
+  return domain.length <= 253 && domain.split('.').every(label.hasMatch);
 }
 
 // ---------------------------------------------------------------------------
@@ -638,16 +873,15 @@ class _DesktopPageState extends State<_DesktopPage> {
       children: [
         const _ContentHeading(
           title: '远程画面',
-          subtitle: '调整本机作为被控端时发送的画面质量。',
+          subtitle: 'WebRTC 当前为 30 FPS、40 Mbps 高码率配置，清晰度优先。',
         ),
         _Section(
-          title: '画面参数',
-          subtitle:
-              '默认 1920 px / 85% / 30 FPS；H.264 高码率优先保证清晰度，JPEG 回退为 4:4:4。',
+          title: '兼容模式（旧 JPEG）',
+          subtitle: '以下帧率、JPEG 质量与最大宽度仅用于兼容模式，不改变 WebRTC 画面。',
           children: [
             Row(
               children: [
-                const _LiveTag(label: '当前配置'),
+                const _LiveTag(label: '兼容配置'),
                 const SizedBox(width: 10),
                 Text(
                   '$_width px · JPEG $_quality% · $_fps FPS',
@@ -682,7 +916,7 @@ class _DesktopPageState extends State<_DesktopPage> {
               },
             ),
             const SizedBox(height: 18),
-            const Text('最大分辨率', style: AppText.label),
+            const Text('最大宽度（兼容模式）', style: AppText.label),
             const SizedBox(height: 10),
             Wrap(
               spacing: 10,
@@ -715,7 +949,7 @@ class _DesktopPageState extends State<_DesktopPage> {
             const SizedBox(height: 12),
             const _InfoLine(
               icon: AppIcons.infoSquare,
-              text: '帧率越高、质量越高，画面越流畅清晰，同时占用更多带宽。',
+              text: '高帧率与高码率需要更多带宽，实际效果受网络及设备性能影响。',
             ),
           ],
         ),

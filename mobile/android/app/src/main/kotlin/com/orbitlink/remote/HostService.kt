@@ -11,8 +11,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -43,82 +42,122 @@ class HostService : Service() {
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private var projection: MediaProjection? = null
     private var relay: HostRelayClient? = null
-    private var capture: ScreenCaptureManager? = null
+    private var rtcHost: RtcScreenHost? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var config: HostConfig? = null
-    private var qualityMode = "高清"
-    private var fps = 20
-    private var sessionActive = false
+    private var activeSessionId: String? = null
     private var cleaningUp = false
 
+    // HostRelayClient and RtcScreenHost dispatch all callbacks on the main thread.
     private val relayListener = object : HostRelayClient.Listener {
         override fun onRelayState(state: String, detail: String?) {
-            main.post {
-                HostRuntime.relay = state
-                HostRuntime.detail = detail
-                if (!sessionActive) {
-                    updateNotification(
-                        when (state) {
-                            "online" -> "中继在线，等待控制端连接"
-                            "connecting" -> "正在连接中继服务器…"
-                            else -> detail ?: "中继连接失败，正在重试"
-                        },
-                    )
+            if (cleaningUp) return
+            HostRuntime.relay = state
+            HostRuntime.detail = detail
+            if (activeSessionId == null) {
+                updateNotification(when (state) {
+                    "online" -> "信令在线，等待控制端连接"
+                    "connecting" -> "正在连接信令服务器…"
+                    else -> detail ?: "信令连接失败，正在重试"
+                })
+            }
+        }
+
+        override fun onSessionStart(controllerName: String, sessionId: String, rtc: Boolean) {
+            if (cleaningUp || relay?.isSessionAllowed(sessionId) != true) return
+            activeSessionId = sessionId
+            if (!rtc) {
+                relay?.endSession(sessionId, "rtc_required")
+                showConnectionFailure("控制端不支持 WebRTC，请更新控制端后重试")
+                return
+            }
+            HostRuntime.sessionActive = true
+            HostRuntime.controllerName = controllerName
+            HostRuntime.detail = null
+            updateNotification("正在与 $controllerName 建立安全连接…")
+            try {
+                checkNotNull(rtcHost).apply {
+                    setQuality("高清")
+                    setFps(30)
+                    startSession(sessionId)
                 }
+            } catch (_: Exception) {
+                relay?.endSession(sessionId, "rtc_failed")
+                showConnectionFailure("远程连接失败，请检查网络或 TURN 配置后重试")
             }
         }
 
-        override fun onSessionStart(controllerName: String) {
-            main.post {
-                sessionActive = true
-                HostRuntime.sessionActive = true
-                HostRuntime.controllerName = controllerName
-                val preset = qualityPreset(qualityMode)
-                capture?.setQuality(preset.second)
-                capture?.setFps(fps)
-                capture?.resume()
-                updateNotification("$controllerName 正在控制本机")
-            }
+        override fun onSessionEnd(sessionId: String) {
+            if (activeSessionId != sessionId) return
+            activeSessionId = null
+            rtcHost?.endSession(sessionId)
+            HostRuntime.sessionActive = false
+            HostRuntime.controllerName = null
+            if (!cleaningUp) updateNotification("等待远程控制")
         }
 
-        override fun onSessionEnd() {
-            main.post {
-                sessionActive = false
-                HostRuntime.sessionActive = false
-                HostRuntime.controllerName = null
-                capture?.pause()
-                updateNotification("等待远程控制")
-            }
+        override fun onRtcSignal(message: JSONObject) {
+            if (cleaningUp || message.optString("session") != activeSessionId) return
+            rtcHost?.handleSignal(message)
         }
 
         override fun onInput(input: JSONObject) {
-            RemoteAccessibilityService.instance?.handleInput(input)
+            if (canAcceptInput()) RemoteAccessibilityService.instance?.handleInput(input)
         }
 
         override fun onClipboard(text: String) {
+            if (!canAcceptInput()) return
             try {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("星轨远控", text))
-            } catch (e: Exception) {
-                Log.w(TAG, "clipboard write failed", e)
+            } catch (_: Exception) {
+                Log.w(TAG, "Clipboard write failed")
             }
         }
 
         override fun onQuality(mode: String) {
-            main.post {
-                qualityMode = mode
-                val preset = qualityPreset(mode)
-                capture?.setQuality(preset.second)
-                capture?.setMaxLongSide(preset.first)
-            }
+            if (canAcceptInput()) rtcHost?.setQuality(mode)
         }
 
         override fun onFps(value: Int) {
-            fps = value.coerceIn(5, 30)
-            main.post { capture?.setFps(fps) }
+            if (canAcceptInput()) rtcHost?.setFps(value)
         }
+    }
+
+    private val rtcListener = object : RtcScreenHost.Listener {
+        override fun onSignal(sessionId: String, signal: JSONObject): Boolean =
+            !cleaningUp && activeSessionId == sessionId && relay?.sendRtcSignal(sessionId, signal) == true
+
+        override fun onMessage(sessionId: String, message: JSONObject) {
+            if (cleaningUp || activeSessionId != sessionId) return
+            relay?.handleDataChannelMessage(sessionId, message) { pong ->
+                rtcHost?.sendData(sessionId, pong) == true
+            }
+        }
+
+        override fun onConnected(sessionId: String) {
+            if (cleaningUp || activeSessionId != sessionId) return
+            updateNotification("${HostRuntime.controllerName ?: "远程用户"} 正在控制本机")
+        }
+
+        override fun onFailure(sessionId: String, message: String) {
+            if (cleaningUp || activeSessionId != sessionId) return
+            relay?.endSession(sessionId, "rtc_failed")
+            showConnectionFailure(message)
+        }
+
+        override fun onCaptureStopped() {
+            if (!cleaningUp) finishService()
+        }
+    }
+
+    private fun canAcceptInput(): Boolean = !cleaningUp &&
+        activeSessionId?.let { relay?.isSessionAllowed(it) } == true
+
+    private fun showConnectionFailure(message: String) {
+        if (cleaningUp) return
+        HostRuntime.detail = message
+        updateNotification(message)
     }
 
     override fun onCreate() {
@@ -165,63 +204,47 @@ class HostService : Service() {
             fail("未获得屏幕共享授权")
             return
         }
-        config = HostConfigStore.load(this)
-        val manager =
-            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val mediaProjection = try {
-            manager.getMediaProjection(resultCode, data)
-        } catch (e: Exception) {
-            Log.e(TAG, "getMediaProjection failed", e)
-            null
+        val config = HostConfigStore.load(this)
+        try {
+            // Pass the already-authorized Intent directly. ScreenCapturerAndroid alone
+            // obtains MediaProjection and creates the single shared VirtualDisplay.
+            val host = RtcScreenHost(this, config, rtcListener)
+            rtcHost = host // Retain partial initialization for cleanup if native startup fails.
+            host.startCapture(data)
+            acquireWakeLock()
+            isRunning = true
+            instance = this
+            HostRuntime.relay = "connecting"
+            HostRuntime.detail = null
+            HostRuntime.sessionActive = false
+            val client = HostRelayClient(config, relayListener)
+            relay = client
+            client.start()
+        } catch (_: Exception) {
+            fail("无法启动屏幕共享，请重新授权后重试")
         }
-        if (mediaProjection == null) {
-            fail("无法创建屏幕采集会话")
-            return
-        }
-        projection = mediaProjection
-        mediaProjection.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                main.post { finishService() }
-            }
-        }, main)
-        acquireWakeLock()
-        capture = ScreenCaptureManager(this, mediaProjection) { jpeg, width, height ->
-            relay?.sendFrame(jpeg, width, height)
-            HostRuntime.width = width
-            HostRuntime.height = height
-        }.also {
-            // Create the single VirtualDisplay immediately; pause encoding until
-            // a controller connects. Android 14+ does not allow a second one.
-            val preset = qualityPreset(qualityMode)
-            it.start(preset.first, preset.second, fps)
-            it.pause()
-        }
-        relay = HostRelayClient(config!!, relayListener).also { it.start() }
-        isRunning = true
-        instance = this
-        HostRuntime.relay = "connecting"
-        HostRuntime.detail = null
-        HostRuntime.sessionActive = false
-        updateNotification("正在连接中继服务器…")
     }
 
     private fun fail(message: String) {
         Log.e(TAG, message)
+        cleanup()
         HostRuntime.relay = "error"
         HostRuntime.detail = message
-        cleanup()
         stopForegroundCompat()
         stopSelf()
     }
 
     fun setAllowRemote(value: Boolean) {
-        relay?.setAllowRemote(value)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            relay?.setAllowRemote(value)
+        } else {
+            main.post { if (!cleaningUp) relay?.setAllowRemote(value) }
+        }
     }
 
-    private fun qualityPreset(mode: String): Pair<Int, Int> = when (mode) {
-        "流畅" -> 960 to 62
-        "超清" -> 1600 to 90
-        else -> 1280 to 80
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        rtcHost?.updateCaptureFormat()
     }
 
     private fun acquireWakeLock() {
@@ -247,24 +270,20 @@ class HostService : Service() {
     private fun cleanup() {
         if (cleaningUp) return
         cleaningUp = true
-        sessionActive = false
-        HostRuntime.sessionActive = false
-        HostRuntime.controllerName = null
-        try {
-            capture?.stop()
-        } catch (_: Exception) {
-        }
-        capture = null
+        // Notify relay before closing signaling, even for notification/system-projection stop.
         try {
             relay?.close()
         } catch (_: Exception) {
+            Log.w(TAG, "Relay cleanup failed")
         }
         relay = null
+        activeSessionId = null
         try {
-            projection?.stop()
+            rtcHost?.dispose()
         } catch (_: Exception) {
+            Log.w(TAG, "RTC cleanup failed")
         }
-        projection = null
+        rtcHost = null
         try {
             wakeLock?.release()
         } catch (_: Exception) {

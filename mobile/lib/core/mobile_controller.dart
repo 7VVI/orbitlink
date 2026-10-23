@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:orbitlink_rtc/orbitlink_rtc.dart';
 
 import '../engine/controller_session.dart';
 import 'host_bridge.dart';
@@ -60,8 +61,8 @@ class MobileController extends ChangeNotifier {
     } catch (_) {}
     try {
       config = await HostBridge.getHostConfig();
-    } catch (e) {
-      bridgeError = '被控端服务未就绪：$e';
+    } catch (_) {
+      bridgeError = '被控端服务未就绪，请重试';
       config = HostBridge.fallbackConfig;
     }
     await _refreshStatus(forceNotify: false);
@@ -122,23 +123,62 @@ class MobileController extends ChangeNotifier {
       if (status.running) {
         showMessage(value ? '已允许远程协助本机' : '已拒绝后续远程请求');
       }
-    } catch (e) {
-      showMessage('保存失败：$e');
+    } catch (_) {
+      showMessage('保存失败，请重试');
     }
     notifyListeners();
   }
 
   Future<void> saveRelayUrl(String url) async {
     final trimmed = url.trim();
-    if (trimmed.isEmpty) return;
-    config = config.copyWith(relayUrl: trimmed);
-    try {
-      config = await HostBridge.saveHostConfig(config);
-      showMessage(status.running ? '中继地址已保存，重启被控后生效' : '中继地址已保存');
-    } catch (_) {
-      showMessage('中继地址已保存在本机界面，重启应用后请重试');
+    final error = validateRelayUrl(trimmed);
+    if (error != null) {
+      showMessage(error);
+      return;
     }
-    notifyListeners();
+    try {
+      config =
+          await HostBridge.saveHostConfig(config.copyWith(relayUrl: trimmed));
+      showMessage(
+          status.running ? '信令地址已保存，下次开启被控生效；当前服务未停止' : '信令地址已保存，下次会话生效');
+    } catch (_) {
+      showMessage('信令地址保存失败，请重试');
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> saveRtcSettings({
+    required String stunUrl,
+    required String turnUrl,
+    required String turnUsername,
+    required String turnCredential,
+  }) async {
+    final error = validateRtcSettings(
+      stunUrl: stunUrl,
+      turnUrl: turnUrl,
+      turnUsername: turnUsername,
+      turnCredential: turnCredential,
+    );
+    if (error != null) {
+      showMessage(error);
+      return;
+    }
+    try {
+      config = await HostBridge.saveHostConfig(config.copyWith(
+        stunUrl: stunUrl.trim(),
+        turnUrl: turnUrl.trim(),
+        turnUsername: turnUsername.trim(),
+        // Passwords are opaque: preserve leading/trailing spaces.
+        turnCredential: turnCredential,
+      ));
+      showMessage(status.running
+          ? 'RTC 配置已保存：控制端下次会话、被控端下次开启服务生效；当前服务未停止'
+          : 'RTC 配置已保存，下次会话或开启被控服务生效');
+    } catch (_) {
+      // Platform errors can contain channel arguments, including credentials.
+      showMessage('RTC 配置保存失败，请重试');
+    }
+    if (!_disposed) notifyListeners();
   }
 
   Future<bool> startHosting() async {
@@ -212,8 +252,8 @@ class MobileController extends ChangeNotifier {
       showMessage('已有远程会话进行中');
       return null;
     }
-    if (config.relayUrl.trim().isEmpty) {
-      showMessage('请先填写中继服务器地址');
+    if (validateRelayUrl(config.relayUrl) != null) {
+      showMessage('请先在设置中填写有效的 WS / WSS 信令地址');
       return null;
     }
     final created = ControllerSession(
@@ -221,6 +261,13 @@ class MobileController extends ChangeNotifier {
       targetId: target,
       password: password,
       fromName: 'Android 控制端',
+      // Each endpoint uses its own ICE configuration; do not signal credentials.
+      iceServers: buildIceServers(
+        stunUrl: config.stunUrl,
+        turnUrl: config.turnUrl,
+        turnUsername: config.turnUsername,
+        turnCredential: config.turnCredential,
+      ),
       onSessionStarted: (peerId, peerName, platform) {
         _rememberDevice(peerId, peerName, platform);
       },

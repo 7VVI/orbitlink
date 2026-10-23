@@ -96,6 +96,7 @@ class _Client {
   String name = '';
   String password = '';
   bool allowRemote = true;
+  bool rtc = false;
   _Session? session;
 
   bool get alive => socket.readyState == WebSocket.open;
@@ -118,6 +119,7 @@ class _Host {
   String password = '';
   String platform = 'unknown';
   bool allowRemote = true;
+  bool rtc = false;
   _Session? activeSession;
 
   int get onlineSessions => activeSession == null ? 0 : 1;
@@ -325,6 +327,7 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
   void _onBinary(_Client client, List<int> data) {
     final session = client.session;
     if (session == null || !session.active) return;
+    if (session.host.rtc && session.controller.rtc) return;
     if (!identical(client, session.host)) return;
     session.controller.sendRaw(data);
   }
@@ -359,11 +362,14 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
     final meta = message['meta'];
     final platform =
         meta is Map ? (meta['platform'] as String? ?? 'unknown') : 'unknown';
+    final rtc = meta is Map && meta['rtc'] == true;
     final host = _Host(client, id)
       ..name = client.name
       ..password = client.password
       ..platform = platform
-      ..allowRemote = client.allowRemote;
+      ..allowRemote = client.allowRemote
+      ..rtc = rtc;
+    client.rtc = rtc;
     _hosts[id] = host;
     client.sendJson({
       't': 'hello_ok',
@@ -400,6 +406,7 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
       _endSession(client.session, reason: 'replaced', notify: true);
     }
     client.role = 'controller';
+    client.rtc = message['rtc'] == true;
     final session = _Session(
       id: _sessionId(),
       host: host.client,
@@ -436,6 +443,7 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
     session.createdAt = DateTime.now();
     final host = _hosts[session.host.hostId];
     if (host != null) host.activeSession = session;
+    final useRtc = session.host.rtc && session.controller.rtc;
     session.host.sendJson({
       't': 'session_start',
       'session': session.id,
@@ -443,6 +451,7 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
       'peerId': '',
       'mode': session.mode,
       'peerPlatform': session.controllerPlatform,
+      'rtc': useRtc,
     });
     final controllerHost = _hosts[session.host.hostId];
     session.controller.sendJson({
@@ -452,6 +461,7 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
       'peerId': session.host.hostId ?? '',
       'mode': session.mode,
       'platform': controllerHost?.platform ?? 'unknown',
+      'rtc': useRtc,
     });
     _log('session ${session.id} active: ${session.host.hostId} <- '
         '${session.controller.name}');
@@ -475,6 +485,15 @@ h1{color:#5a55f2;font-size:24px}code{color:#0b8f83;background:#e6f8f5;padding:2p
   void _forward(_Client client, Map<String, dynamic> message) {
     final session = client.session;
     if (session == null || !session.active) return;
+    final action = message['action'];
+    if (action is String && action.startsWith('rtc_')) {
+      if (!session.host.rtc ||
+          !session.controller.rtc ||
+          message['session'] != session.id) return;
+      if (action == 'rtc_offer' && !identical(client, session.host)) return;
+      if (action == 'rtc_answer' && !identical(client, session.controller))
+        return;
+    }
     final peer = session.peerOf(client);
     peer.sendJson(message);
   }

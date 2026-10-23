@@ -3,7 +3,8 @@
 一个 APK 同时具备**控制端**和**被控端**，与 Windows 客户端共用 `server/` 中继和同一套识别码/验证码协议。
 
 - **控制端**：输入对方识别码与验证码建立会话；连接 Android 自动切换触控模式，连接 Windows 使用鼠标模式；支持文本、系统键、画质、剪贴板与最近设备。
-- **被控端**：`MediaProjection` 整屏采集 → JPEG → WebSocket 中继；`AccessibilityService` 免 root 注入点击/滑动/长按/滚动/系统键/文本。
+- **被控端**：`ScreenCapturerAndroid` / `MediaProjection` 整屏轨道 → WebRTC；`AccessibilityService` 免 root 注入点击/滑动/长按/滚动/系统键/文本。
+- **网络**：WS/WSS 负责信令，媒体走 SRTP、输入走 DataChannel，ICE 优先直连，失败时使用自营标准 TURN。两端各自保存 STUN/TURN 配置，TURN 凭据不随信令发送给对端。
 - **互通**：Android ↔ Android、Android ↔ Windows。
 
 ## 界面
@@ -42,19 +43,20 @@ adb install -r build\app\outputs\flutter-apk\app-release.apk
    - 首次会请求通知权限（Android 13+）；
    - 系统弹窗中选择 **共享整个屏幕**；
    - 如未启用「星轨输入服务」，可先仅共享屏幕，稍后到系统设置中开启。
-3. 前台服务通知会显示中继状态；控制端连接后立即推流。
-4. 可在「远控」页切换被控画质：流畅 960px/62%、高清 1280px/80%、超清 1600px/90%；默认按 20 FPS 推流。
-4. 可在通知或应用内随时「停止本机被控」。
+3. 前台服务通知显示被控状态；只有验证通过的 WebRTC 会话可接收视频与输入。
+4. 默认长边不超过 1920、30 FPS、最高 40 Mbps，流畅档降低码率上限；实际帧率/码率自适应。
+5. 可在通知或应用内随时「停止本机被控」，系统撤销屏幕授权也会停止服务。
 
 Android 14+ 一个 MediaProjection 令牌只能创建一个 VirtualDisplay。本实现复用一个采集实例，在多次会话之间暂停/恢复编码。
 
 ### 控制端
 
-1. 在「设置 → 中继服务器」填写中继地址：
+1. 在「设置 → 信令服务器」填写与对端相同的信令地址：
    - 模拟器访问电脑上的服务：`ws://10.0.2.2:7080/ws`
    - 真机：`ws://<电脑局域网 IP>:7080/ws`
-2. 在「远控」页输入对方 9 位识别码与验证码，点击「连接」。
-3. 会话工具栏：键盘、系统键（Android 被控时）、触控/鼠标切换、画质、更多（文本、剪贴板、结束）。
+2. 在「设置 → WebRTC 连接」填写本机使用的 STUN/TURN 地址和凭据。公网推荐 WSS/TURNS 与可信证书；未配置 TURN 时严格 NAT 可能无法连接。保存不停止当前服务，被控端下次开启生效。
+3. 在「远控」页输入对方 9 位识别码与验证码，点击「连接」。
+4. 会话工具栏：键盘、系统键（Android 被控时）、触控/鼠标切换、画质、更多（文本、剪贴板、结束）。状态基于真实视频首帧与 DataChannel 就绪，FPS/RTT 和 P2P/TURN 来自接收端统计。
 
 ## 权限
 
@@ -71,7 +73,7 @@ Android 14+ 一个 MediaProjection 令牌只能创建一个 VirtualDisplay。本
 
 ## 中继
 
-- Windows：`server\build\orbitlink-relay.exe` 或根目录 `start_relay.bat`
+- Windows：`server\build\orbitlink-signaling-webrtc.exe` 或根目录 `start_relay.bat`；先停止占用同一端口的旧信令进程
 - Docker：`docker compose up -d --build`（镜像 `orbitlink-relay:1.0.0`）
 - 健康检查：`http://<host>:7080/health`
 
@@ -94,7 +96,8 @@ mobile/
    │  ├─ MainActivity.kt             MethodChannel、授权流程
    │  ├─ HostService.kt              前台服务、通知
    │  ├─ HostRelayClient.kt          OkHttp WebSocket 被控客户端
-   │  ├─ ScreenCaptureManager.kt     VirtualDisplay / ImageReader / JPEG
+   │  ├─ RtcScreenHost.kt            屏幕轨道 / ICE / DataChannel / 会话释放
+   │  ├─ ScreenCaptureManager.kt     旧 JPEG 捕获实现（当前服务不使用）
    │  ├─ RemoteAccessibilityService.kt 手势、文本、系统键
    │  ├─ HostConfig.kt               本机身份
    │  └─ HostRuntime.kt              状态快照
@@ -102,6 +105,10 @@ mobile/
 ```
 
 ## 已验证
+
+当前 WebRTC：Release APK 构建、安装、启动及 21 项移动端 Dart 回归测试通过；模拟器控制 Windows 已收到 H.264 桌面、显示 P2P 和真实帧率；Windows 回连模拟器已收到 VP8 屏幕，DataChannel 远程点击设置页、横竖屏旋转和停止被控释放 MediaProjection 均已验证。公网 NAT、TURN/TURNS 与真实多设备长时测试需要部署环境验收。
+
+下面是 `main_ws` 迁移前的历史记录，不代表新 WebRTC 的性能：
 
 - Android 被控端注册与整屏 JPEG 推流（576×1280，多次会话 21/17 帧）。
 - 系统键返回桌面、触摸点击打开应用、无障碍文本输入。
@@ -111,7 +118,7 @@ mobile/
 ## 已知限制
 
 1. 免 root 注入依赖无障碍服务；部分系统 ROM 可能限制后台无障碍。
-2. 每次开启被控都需要重新授权屏幕共享；分辨率在本次服务启动时固定。
+2. 每次开启被控需重新授权屏幕共享；授权期内单一 VirtualDisplay 复用，旋转调整采集尺寸，系统撤销授权会关闭服务。
 3. 被控期间必须保持前台服务通知；部分厂商系统需要额外关闭电池优化。
 4. 中继为 `ws://` 明文，公网使用请部署 `wss://` 反向代理。
 5. 远程文件、语音、隐私屏等能力尚未接入。

@@ -15,6 +15,9 @@ dependencies:
   window_manager: ^0.4.2
   web_socket_channel: ^3.0.1
   ffi: ^2.1.3
+  flutter_webrtc: 0.12.7
+  orbitlink_rtc:
+    path: ../packages/orbitlink_rtc
 
 dev_dependencies:
   flutter_test:

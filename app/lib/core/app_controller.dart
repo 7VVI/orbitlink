@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:orbitlink_rtc/orbitlink_rtc.dart';
 
 import '../engine/controller_session.dart';
 import '../engine/host_engine.dart';
@@ -147,9 +148,11 @@ class AppController extends ChangeNotifier {
   }
 
   void updateSettings(void Function(AppSettings s) mutate) {
-    mutate(settings);
+    final next = AppSettings.fromJson(settings.toJson());
+    mutate(next);
+    config.settings = next;
     ConfigStore.save(config);
-    host.updateSettings(settings);
+    host.updateSettings(next);
     notifyListeners();
   }
 
@@ -173,10 +176,7 @@ class AppController extends ChangeNotifier {
   void setRelayUrl(String url) {
     final trimmed = url.trim();
     if (trimmed.isEmpty) return;
-    settings.relayUrl = trimmed;
-    ConfigStore.save(config);
-    host.updateSettings(settings);
-    notifyListeners();
+    updateSettings((s) => s.relayUrl = trimmed);
   }
 
   void copyDeviceId() {
@@ -204,6 +204,12 @@ class AppController extends ChangeNotifier {
       targetId: target,
       password: password,
       fromName: identity.name,
+      iceServers: buildIceServers(
+        stunUrl: settings.stunUrl,
+        turnUrl: settings.turnUrl,
+        turnUsername: settings.turnUsername,
+        turnCredential: settings.turnCredential,
+      ),
       onSessionStarted: (peerId, peerName, peerPlatform) {
         _rememberDevice(peerId, peerName, peerPlatform);
       },

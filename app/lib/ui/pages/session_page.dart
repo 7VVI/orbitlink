@@ -5,7 +5,9 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../core/app_controller.dart';
@@ -31,6 +33,7 @@ class SessionPage extends StatefulWidget {
 
 class _SessionPageState extends State<SessionPage> {
   final FocusNode _focus = FocusNode(debugLabel: 'remote-surface');
+  final GlobalKey _rtcBoundaryKey = GlobalKey();
   ui.Image? _image;
   bool _decoding = false;
   int _decodedSeq = -1;
@@ -51,6 +54,7 @@ class _SessionPageState extends State<SessionPage> {
     session.peerPlatform.addListener(_onChanged);
     session.stats.addListener(_onChanged);
     session.transport.addListener(_onChanged);
+    session.rtcRenderer.addListener(_onChanged);
     session.latestFrame.addListener(_onFrame);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -64,7 +68,9 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   void _onChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    if (session.rtcRenderer.value != null) _requestKeyboardFocus();
   }
 
   void _onFrame() {
@@ -174,6 +180,7 @@ class _SessionPageState extends State<SessionPage> {
     session.peerPlatform.removeListener(_onChanged);
     session.stats.removeListener(_onChanged);
     session.transport.removeListener(_onChanged);
+    session.rtcRenderer.removeListener(_onChanged);
     session.latestFrame.removeListener(_onFrame);
     _image?.dispose();
     if (_fullscreen) windowManager.setFullScreen(false);
@@ -229,7 +236,23 @@ class _SessionPageState extends State<SessionPage> {
 
   Future<void> _screenshot() async {
     final controller = AppScope.read(context);
-    final image = _image?.clone();
+    ui.Image? image = _image?.clone();
+    if (image == null) {
+      final renderer = session.rtcRenderer.value;
+      if (renderer == null ||
+          renderer.videoWidth <= 0 ||
+          renderer.videoHeight <= 0) {
+        controller.showToast('暂无画面可截取');
+        return;
+      }
+      final boundary = _rtcBoundaryKey.currentContext?.findRenderObject();
+      if (boundary is RenderRepaintBoundary) {
+        try {
+          image = await boundary.toImage(
+              pixelRatio: renderer.videoWidth / boundary.size.width);
+        } catch (_) {}
+      }
+    }
     if (image == null) {
       controller.showToast('暂无画面可截取');
       return;
@@ -418,7 +441,9 @@ class _SessionPageState extends State<SessionPage> {
                     const _StatusDot(color: AppColors.success),
                     const SizedBox(width: 6),
                     Text(
-                      '${session.transport.value == 'direct' ? '直连' : '中继'} · ${stats.codec == 'h264' ? 'H.264' : '高清'} · ${stats.fps} 帧 · ${stats.latencyMs} ms',
+                      session.rtcRenderer.value != null
+                          ? 'WebRTC ${session.transport.value == 'direct' ? 'P2P' : session.transport.value == 'turn' ? 'TURN' : ''} · ${stats.codec.toUpperCase()} · ${stats.fps} 帧 · ${stats.latencyMs} ms'
+                          : '${session.transport.value == 'direct' ? '直连' : '中继'} · ${stats.codec == 'h264' ? 'H.264' : '高清'} · ${stats.fps} 帧 · ${stats.latencyMs} ms',
                       style: const TextStyle(
                         fontSize: 11,
                         color: AppColors.sessionMuted,
@@ -426,7 +451,12 @@ class _SessionPageState extends State<SessionPage> {
                     ),
                   ] else
                     Text(
-                      state == ControllerState.ringing ? '等待对方接受…' : '正在连接…',
+                      switch (state) {
+                        ControllerState.ringing => '等待对方接受…',
+                        ControllerState.ended => '已结束',
+                        ControllerState.failed => '连接失败',
+                        _ => '正在连接…',
+                      },
                       style: const TextStyle(
                         fontSize: 11,
                         color: AppColors.sessionMuted,
@@ -479,6 +509,8 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildSurface(bool connected) {
+    final renderer = session.rtcRenderer.value;
+    if (renderer != null) return _buildRtcSurface(renderer);
     return LayoutBuilder(
       builder: (context, constraints) {
         final image = _image;
@@ -531,7 +563,8 @@ class _SessionPageState extends State<SessionPage> {
             onPointerDown: (event) {
               _focus.requestFocus();
               final p = normalized(event.localPosition);
-              if (p != null) session.mouseMove(p.dx, p.dy);
+              if (p == null) return;
+              session.mouseMove(p.dx, p.dy);
               if (event.buttons & kPrimaryMouseButton != 0) {
                 _press('left');
               }
@@ -641,6 +674,150 @@ class _SessionPageState extends State<SessionPage> {
       session.mouseButton(button, false);
     }
     _pressed.clear();
+  }
+
+  Widget _buildRtcSurface(RTCVideoRenderer renderer) {
+    final connected = session.state.value == ControllerState.connected;
+    return ListenableBuilder(
+      listenable: renderer,
+      builder: (context, _) => LayoutBuilder(
+        builder: (context, constraints) {
+          final videoW =
+              renderer.videoWidth > 0 ? renderer.videoWidth.toDouble() : 16.0;
+          final videoH =
+              renderer.videoHeight > 0 ? renderer.videoHeight.toDouble() : 9.0;
+          final scale = math.min(
+            constraints.maxWidth / videoW,
+            constraints.maxHeight / videoH,
+          );
+          final dw = videoW * scale;
+          final dh = videoH * scale;
+          final dx = (constraints.maxWidth - dw) / 2;
+          final dy = (constraints.maxHeight - dh) / 2;
+
+          Offset? normalized(Offset local) {
+            if (!connected ||
+                renderer.videoWidth <= 0 ||
+                renderer.videoHeight <= 0 ||
+                dw <= 0 ||
+                dh <= 0) return null;
+            if (_pressed.isEmpty &&
+                !Rect.fromLTWH(dx, dy, dw, dh).contains(local)) return null;
+            final x = ((local.dx - dx) / dw).clamp(0.0, 1.0);
+            final y = ((local.dy - dy) / dh).clamp(0.0, 1.0);
+            return Offset(x, y);
+          }
+
+          return ColoredBox(
+            color: AppColors.sessionBg,
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (event) {
+                _focus.requestFocus();
+                final p = normalized(event.localPosition);
+                if (p == null) return;
+                session.mouseMove(p.dx, p.dy);
+                if (event.buttons & kPrimaryMouseButton != 0) {
+                  _press('left');
+                }
+                if (event.buttons & kSecondaryMouseButton != 0) {
+                  _press('right');
+                }
+                if (event.buttons & kMiddleMouseButton != 0) {
+                  _press('middle');
+                }
+              },
+              onPointerMove: (event) {
+                final p = normalized(event.localPosition);
+                if (p != null) session.mouseMove(p.dx, p.dy);
+              },
+              onPointerUp: (event) => _releaseAll(),
+              onPointerCancel: (_) => _releaseAll(),
+              onPointerSignal: (event) {
+                if (event is PointerScrollEvent) {
+                  final p = normalized(event.localPosition);
+                  if (p != null) session.mouseMove(p.dx, p.dy);
+                  final delta = -(event.scrollDelta.dy / 100 * 120).round();
+                  if (delta != 0) {
+                    session.mouseWheel(delta.clamp(-360, 360));
+                  }
+                }
+              },
+              child: MouseRegion(
+                cursor: SystemMouseCursors.basic,
+                onEnter: (_) => setState(() => _pointerInside = true),
+                onExit: (_) => setState(() => _pointerInside = false),
+                onHover: (event) {
+                  final p = normalized(event.localPosition);
+                  if (p != null) session.mouseMove(p.dx, p.dy);
+                },
+                child: Focus(
+                  focusNode: _focus,
+                  autofocus: true,
+                  onKeyEvent: (node, event) {
+                    if (!connected) return KeyEventResult.ignored;
+                    if (event.logicalKey == LogicalKeyboardKey.escape) {
+                      if (_fullscreen) {
+                        _toggleFullscreen();
+                        return KeyEventResult.handled;
+                      }
+                      return KeyEventResult.ignored;
+                    }
+                    final vk = windowsVirtualKey(event.logicalKey);
+                    if (vk == null) return KeyEventResult.ignored;
+                    if (event is KeyDownEvent || event is KeyRepeatEvent) {
+                      session.key(vk, true,
+                          extended: isExtendedKey(event.logicalKey));
+                      return KeyEventResult.handled;
+                    }
+                    if (event is KeyUpEvent) {
+                      session.key(vk, false,
+                          extended: isExtendedKey(event.logicalKey));
+                      return KeyEventResult.handled;
+                    }
+                    return KeyEventResult.ignored;
+                  },
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        left: dx,
+                        top: dy,
+                        width: dw,
+                        height: dh,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0x66000000),
+                                blurRadius: 30,
+                                spreadRadius: 2,
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: RepaintBoundary(
+                              key: _rtcBoundaryKey,
+                              child: RTCVideoView(
+                                renderer,
+                                objectFit: RTCVideoViewObjectFit
+                                    .RTCVideoViewObjectFitContain,
+                                mirror: false,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Widget _buildConnecting(ControllerState state) {

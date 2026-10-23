@@ -10,6 +10,10 @@ data class HostConfig(
     val name: String,
     val relayUrl: String,
     val allowRemote: Boolean,
+    val stunUrl: String = "stun:stun.l.google.com:19302",
+    val turnUrl: String = "",
+    val turnUsername: String = "",
+    val turnCredential: String = "",
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
@@ -17,12 +21,20 @@ data class HostConfig(
         "name" to name,
         "relayUrl" to relayUrl,
         "allowRemote" to allowRemote,
+        "stunUrl" to stunUrl,
+        "turnUrl" to turnUrl,
+        "turnUsername" to turnUsername,
+        "turnCredential" to turnCredential,
     )
+
+    // Never include credentials or user-provided URLs in diagnostic output.
+    override fun toString(): String = "HostConfig(<redacted>)"
 }
 
 object HostConfigStore {
     private const val PREFS = "orbitlink_host"
     private const val DEFAULT_RELAY = "ws://10.0.2.2:7080/ws"
+    private const val DEFAULT_STUN = "stun:stun.l.google.com:19302"
     private val random = SecureRandom()
     private const val PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 
@@ -48,6 +60,12 @@ object HostConfigStore {
         if (!prefs.contains("allowRemote")) {
             editor.putBoolean("allowRemote", true)
         }
+        if (!prefs.contains("stunUrl")) {
+            editor.putString("stunUrl", DEFAULT_STUN)
+        }
+        for (key in listOf("turnUrl", "turnUsername", "turnCredential")) {
+            if (!prefs.contains(key)) editor.putString(key, "")
+        }
         editor.apply()
         return HostConfig(
             id = id,
@@ -55,6 +73,10 @@ object HostConfigStore {
             name = prefs.getString("name", defaultName()) ?: defaultName(),
             relayUrl = prefs.getString("relayUrl", DEFAULT_RELAY) ?: DEFAULT_RELAY,
             allowRemote = prefs.getBoolean("allowRemote", true),
+            stunUrl = prefs.getString("stunUrl", DEFAULT_STUN) ?: DEFAULT_STUN,
+            turnUrl = prefs.getString("turnUrl", "") ?: "",
+            turnUsername = prefs.getString("turnUsername", "") ?: "",
+            turnCredential = prefs.getString("turnCredential", "") ?: "",
         )
     }
 
@@ -63,6 +85,10 @@ object HostConfigStore {
             id = config.id.filter { it.isDigit() }.take(9).ifEmpty { generateId() },
             password = config.password.ifBlank { generatePassword() },
             relayUrl = config.relayUrl.trim().ifBlank { DEFAULT_RELAY },
+            stunUrl = config.stunUrl.trim(),
+            turnUrl = config.turnUrl.trim(),
+            turnUsername = config.turnUsername.trim(),
+            // TURN credentials are opaque; do not trim or log them.
         )
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("id", sanitized.id)
@@ -70,6 +96,10 @@ object HostConfigStore {
             .putString("name", sanitized.name)
             .putString("relayUrl", sanitized.relayUrl)
             .putBoolean("allowRemote", sanitized.allowRemote)
+            .putString("stunUrl", sanitized.stunUrl)
+            .putString("turnUrl", sanitized.turnUrl)
+            .putString("turnUsername", sanitized.turnUsername)
+            .putString("turnCredential", sanitized.turnCredential)
             .apply()
         return sanitized
     }

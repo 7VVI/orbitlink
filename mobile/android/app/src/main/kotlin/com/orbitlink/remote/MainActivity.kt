@@ -46,6 +46,12 @@ class MainActivity : FlutterActivity() {
                             relayUrl = (args["relayUrl"] as? String) ?: current.relayUrl,
                             allowRemote = (args["allowRemote"] as? Boolean)
                                 ?: current.allowRemote,
+                            stunUrl = (args["stunUrl"] as? String) ?: current.stunUrl,
+                            turnUrl = (args["turnUrl"] as? String) ?: current.turnUrl,
+                            turnUsername = (args["turnUsername"] as? String)
+                                ?: current.turnUsername,
+                            turnCredential = (args["turnCredential"] as? String)
+                                ?: current.turnCredential,
                         )
                         result.success(HostConfigStore.save(this, config).toMap())
                     }

@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:orbitlink_rtc/orbitlink_rtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/models.dart';
@@ -56,6 +58,7 @@ class ControllerSession {
     required this.targetId,
     required this.password,
     required this.fromName,
+    this.iceServers = const [],
     this.onClosed,
     this.onSessionStarted,
   }) {
@@ -66,6 +69,7 @@ class ControllerSession {
   final String targetId;
   final String password;
   final String fromName;
+  final List<Map<String, dynamic>> iceServers;
   final void Function(String reason)? onClosed;
   final void Function(String peerId, String peerName, String peerPlatform)?
       onSessionStarted;
@@ -78,6 +82,7 @@ class ControllerSession {
   final ValueNotifier<RemoteStats> stats = ValueNotifier(const RemoteStats());
   final ValueNotifier<RenderedFrame?> latestFrame = ValueNotifier(null);
   final ValueNotifier<String> transport = ValueNotifier('relay');
+  final ValueNotifier<RTCVideoRenderer?> rtcRenderer = ValueNotifier(null);
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -97,9 +102,11 @@ class ControllerSession {
   Map<String, dynamic>? _directOffer;
   Timer? _directRetryTimer;
   int _directRetries = 0;
-  WebSocket? _directSession;
-  StreamSubscription<dynamic>? _directSessionSub;
-  bool _lanAttempted = false;
+  RtcControllerSession? _rtc;
+  bool _rtcMode = false;
+  bool _rtcFirstFrame = false;
+  Timer? _rtcTimeout;
+  bool get isRtc => _rtcMode;
   final ListQueue<RenderedFrame> _h264Queue = ListQueue<RenderedFrame>();
   H264DecoderWorker? _decoderWorker;
   bool _decoderDraining = false;
@@ -108,17 +115,15 @@ class ControllerSession {
   int _h264Errors = 0;
 
   Future<void> start() async {
-    // LAN first: if the host is discoverable, the whole session (video,
-    // input and control) runs directly and the relay is not needed.
-    if (await _tryLanSession()) return;
+    if (_disposed || _closedByUser || _channel != null) return;
     try {
       final channel = connectRelay(relayUrl);
+      _channel = channel;
       await channel.ready.timeout(const Duration(seconds: 6));
-      if (_disposed) {
+      if (_disposed || _closedByUser || _channel != channel) {
         await channel.sink.close();
         return;
       }
-      _channel = channel;
       _subscription = channel.stream.listen(
         _onData,
         onDone: () => _onSocketClosed('连接已断开'),
@@ -132,6 +137,7 @@ class ControllerSession {
         'from': fromName,
         'mode': 'desktop',
         'platform': 'windows',
+        'rtc': true,
       });
       _startPing();
     } catch (_) {
@@ -142,7 +148,7 @@ class ControllerSession {
   void _startPing() {
     _pingTimer?.cancel();
     _pingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      if (state.value != ControllerState.connected) return;
+      if (_rtcMode || state.value != ControllerState.connected) return;
       _lastPingTs = DateTime.now().millisecondsSinceEpoch;
       _send({
         't': RelayMessage.control,
@@ -152,13 +158,102 @@ class ControllerSession {
     });
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (_directSession == null) _send({'t': RelayMessage.ping});
+      _sendRelay({'t': RelayMessage.ping});
     });
   }
 
+  Future<void> _startRtcController() async {
+    final sessionId = _sessionId;
+    final rtc = RtcControllerSession(
+      iceServers: iceServers,
+      onSignal: (message) {
+        if (!_disposed && sessionId == _sessionId) _sendSignal(message);
+      },
+      onState: (value) {
+        if (!_disposed && sessionId == _sessionId) _onRtcState(value);
+      },
+      onStats: (value) {
+        if (_disposed || sessionId != _sessionId) return;
+        transport.value = value.transport;
+        stats.value = RemoteStats(
+          fps: value.fps,
+          kbps: value.kbps,
+          width: value.width,
+          height: value.height,
+          latencyMs: value.latencyMs,
+          codec: value.codec,
+        );
+      },
+    );
+    _rtc = rtc;
+    _rtcTimeout = Timer(const Duration(seconds: 30), () {
+      if (_rtc == rtc) _fail('连接超时，请检查双方网络');
+    });
+    try {
+      await rtc.initialize();
+      if (_disposed || _rtc != rtc) return;
+      rtc.renderer.onFirstFrameRendered = () {
+        if (_disposed || _rtc != rtc) return;
+        _rtcFirstFrame = true;
+        _onRtcState('ready');
+      };
+      rtcRenderer.value = rtc.renderer;
+    } catch (_) {
+      if (!_disposed && _rtc == rtc) _fail('无法建立远程画面连接');
+    }
+  }
+
+  Future<void> _handleRtcSignal(Map<String, dynamic> message) async {
+    final rtc = _rtc;
+    if (!_rtcMode || rtc == null || message['session'] != _sessionId) return;
+    try {
+      if (message['action'] == 'rtc_offer') {
+        await rtc.handleOffer(message);
+      } else {
+        await rtc.handleSignal(message);
+      }
+    } catch (_) {
+      if (!_disposed && _rtc == rtc) _fail('无法建立远程画面连接');
+    }
+  }
+
+  void _onRtcState(String rtcState) {
+    if (_disposed || !_rtcMode) return;
+    if ((rtcState == 'ready' || rtcState == 'connected') &&
+        _rtc?.connected == true &&
+        _rtcFirstFrame) {
+      _rtcTimeout?.cancel();
+      state.value = ControllerState.connected;
+    } else if (rtcState == 'disconnected') {
+      state.value = ControllerState.connecting;
+      _rtcTimeout?.cancel();
+      _rtcTimeout = Timer(const Duration(seconds: 10), () => _fail('远程连接已断开'));
+    } else if (rtcState == 'failed' || rtcState == 'closed') {
+      _fail('远程连接已断开，请重试');
+    }
+  }
+
+  void _sendSignal(Map<String, dynamic> message) => _sendRelay({
+        ...message,
+        't': RelayMessage.control,
+        'session': _sessionId,
+      });
+
+  void _sendRelay(Map<String, dynamic> message) {
+    final channel = _channel;
+    if (channel == null) return;
+    try {
+      channel.sink.add(jsonEncode(message));
+    } catch (_) {}
+  }
+
   void _onData(dynamic data) {
+    if (_disposed ||
+        _closedByUser ||
+        state.value == ControllerState.ended ||
+        state.value == ControllerState.failed) return;
     if (data is! String) {
-      if (_transport == 'direct') return;
+      if (_rtcMode || _transport == 'direct') return;
       _handleVideoData(data as dynamic);
       return;
     }
@@ -180,25 +275,33 @@ class ControllerSession {
         if (platform != null && platform.isNotEmpty) {
           peerPlatform.value = platform;
         }
-        state.value = ControllerState.connected;
         error.value = null;
-        _transport = 'relay';
-        transport.value = 'relay';
-        _directRetries = 0;
-        _directRetryTimer?.cancel();
-        _directRetryTimer = null;
-        final pendingOffer = _directOffer;
-        _directOffer = null;
-        if (pendingOffer != null && pendingOffer['session'] == _sessionId) {
-          _rememberDirectOffer(pendingOffer);
+        if (message['rtc'] == true) {
+          _rtcMode = true;
+          _transport = 'rtc';
+          transport.value = 'negotiating';
+          state.value = ControllerState.connecting;
+          unawaited(_startRtcController());
+        } else {
+          state.value = ControllerState.connected;
+          _transport = 'relay';
+          transport.value = 'relay';
+          _directRetries = 0;
+          _directRetryTimer?.cancel();
+          _directRetryTimer = null;
+          final pendingOffer = _directOffer;
+          _directOffer = null;
+          if (pendingOffer != null && pendingOffer['session'] == _sessionId) {
+            _rememberDirectOffer(pendingOffer);
+          }
+          // Ask the host for the bandwidth-friendly codec; it falls back to
+          // JPEG on its own when the native encoder is unavailable.
+          _send({
+            't': RelayMessage.control,
+            'action': 'codec',
+            'value': 'h264',
+          });
         }
-        // Ask the host for the bandwidth-friendly codec; it falls back to
-        // JPEG on its own when the native encoder is unavailable.
-        _send({
-          't': RelayMessage.control,
-          'action': 'codec',
-          'value': 'h264',
-        });
         onSessionStarted?.call(
           message['peerId'] as String? ?? targetId,
           peerName.value,
@@ -206,6 +309,7 @@ class ControllerSession {
         );
         break;
       case RelayMessage.stats:
+        if (_rtcMode) break;
         stats.value = stats.value.copyWith(
           fps: (message['fps'] as num?)?.toInt() ?? 0,
           kbps: (message['kbps'] as num?)?.toInt() ?? 0,
@@ -227,6 +331,9 @@ class ControllerSession {
           );
         } else if (message['action'] == 'p2p_offer') {
           _rememberDirectOffer(message);
+        } else if (message['action'] == 'rtc_offer' ||
+            message['action'] == 'rtc_candidate') {
+          unawaited(_handleRtcSignal(message));
         }
         break;
       case RelayMessage.p2p:
@@ -238,7 +345,7 @@ class ControllerSession {
         _finish('对方已结束远程控制');
         break;
       case RelayMessage.error:
-        if (_directSession != null) break;
+        if (_rtcMode) break;
         final reason = message['reason'] as String? ?? '';
         _fail(_reasonText(reason));
         break;
@@ -257,191 +364,8 @@ class ControllerSession {
     }
   }
 
-  Future<bool> _tryLanSession() async {
-    if (_disposed) return false;
-    if (_directSession != null) return true;
-    if (_lanAttempted) return false;
-    _lanAttempted = true;
-    final host = await _discoverHost();
-    if (host == null) return false;
-
-    WebSocket? socket;
-    StreamSubscription<dynamic>? sub;
-    try {
-      socket = await connectDirectSocket(
-        'ws://${host.ip}:${host.port}/direct',
-        timeout: const Duration(seconds: 3),
-      );
-      socket.pingInterval = const Duration(seconds: 5);
-      final ready = Completer<Map<String, dynamic>?>();
-      sub = socket.listen(
-        (data) {
-          if (!ready.isCompleted) {
-            if (data is String) {
-              try {
-                final message =
-                    (jsonDecode(data) as Map).cast<String, dynamic>();
-                if (message['t'] == 'direct_ok' ||
-                    message['t'] == 'direct_error') {
-                  ready.complete(message);
-                  return;
-                }
-              } catch (_) {}
-            }
-            ready.complete(null);
-            return;
-          }
-          if (data is String) {
-            _onData(data);
-          } else {
-            _handleVideoData(data);
-          }
-        },
-        onDone: () {
-          if (!ready.isCompleted) {
-            ready.complete(null);
-          } else if (identical(_directSession, socket)) {
-            _handleDirectSessionClosed();
-          }
-        },
-        onError: (Object _) {
-          if (!ready.isCompleted) {
-            ready.complete(null);
-          } else if (identical(_directSession, socket)) {
-            _handleDirectSessionClosed();
-          }
-        },
-      );
-      socket.add(jsonEncode({
-        't': 'direct_hello',
-        'target': targetId,
-        'password': password,
-        'from': fromName,
-        'platform': 'windows',
-      }));
-      final result = await ready.future.timeout(
-        const Duration(seconds: 4),
-        onTimeout: () => null,
-      );
-      if (result == null || result['t'] != 'direct_ok') {
-        await sub.cancel();
-        try {
-          await socket.close();
-        } catch (_) {}
-        return false;
-      }
-
-      _directSession = socket;
-      _directSessionSub = sub;
-      _sessionId = result['session'] as String? ?? '';
-      peerName.value = result['peer'] as String? ?? peerName.value;
-      peerPlatform.value = result['platform'] as String? ?? 'windows';
-      state.value = ControllerState.connected;
-      error.value = null;
-      _transport = 'direct';
-      transport.value = 'direct';
-      _h264Queue.clear();
-      _waitingForKeyframe = true;
-      _decoderWorker?.reset();
-      _h264Errors = 0;
-      _directOffer = null;
-      _directRetries = 0;
-      _directRetryTimer?.cancel();
-      _startPing();
-      onSessionStarted?.call(targetId, peerName.value, peerPlatform.value);
-      _send({'t': RelayMessage.control, 'action': 'codec', 'value': 'h264'});
-      return true;
-    } catch (_) {
-      try {
-        await sub?.cancel();
-      } catch (_) {}
-      try {
-        await socket?.close();
-      } catch (_) {}
-      return false;
-    }
-  }
-
-  Future<({String ip, int port})?> _discoverHost() async {
-    RawDatagramSocket? socket;
-    StreamSubscription<RawSocketEvent>? sub;
-    try {
-      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      socket.broadcastEnabled = true;
-      final found = Completer<({String ip, int port})?>();
-      sub = socket.listen((event) {
-        if (event != RawSocketEvent.read) return;
-        final datagram = socket?.receive();
-        if (datagram == null) return;
-        try {
-          final message = (jsonDecode(utf8.decode(datagram.data)) as Map)
-              .cast<String, dynamic>();
-          if (message['t'] == 'orbitlink_host' &&
-              message['id'] == targetId &&
-              message['busy'] != true &&
-              !found.isCompleted) {
-            final port = (message['port'] as num?)?.toInt() ?? 0;
-            if (port > 0) {
-              found.complete((ip: datagram.address.address, port: port));
-            }
-          }
-        } catch (_) {}
-      });
-      final targets = <String>{'255.255.255.255', '127.0.0.1'};
-      try {
-        final interfaces = await NetworkInterface.list(
-          type: InternetAddressType.IPv4,
-          includeLoopback: false,
-        );
-        for (final interface in interfaces) {
-          for (final address in interface.addresses) {
-            final parts = address.address.split('.');
-            if (parts.length == 4) {
-              targets.add('${parts[0]}.${parts[1]}.${parts[2]}.255');
-            }
-          }
-        }
-      } catch (_) {}
-      final probe = utf8
-          .encode(jsonEncode({'t': 'orbitlink_discover', 'target': targetId}));
-      for (var attempt = 0; attempt < 2; attempt++) {
-        for (final target in targets) {
-          try {
-            socket.send(probe, InternetAddress(target), 7082);
-          } catch (_) {}
-        }
-        final result = await found.future.timeout(
-          const Duration(milliseconds: 600),
-          onTimeout: () => null,
-        );
-        if (result != null) return result;
-      }
-      return null;
-    } catch (_) {
-      return null;
-    } finally {
-      await sub?.cancel();
-      socket?.close();
-    }
-  }
-
-  void _handleDirectSessionClosed() {
-    if (_disposed) return;
-    final sub = _directSessionSub;
-    _directSessionSub = null;
-    try {
-      sub?.cancel();
-    } catch (_) {}
-    _directSession = null;
-    _transport = 'relay';
-    transport.value = 'relay';
-    if (state.value == ControllerState.connected) {
-      _fail('连接已断开');
-    }
-  }
-
   void _rememberDirectOffer(Map<String, dynamic> offer) {
-    if (_disposed || _directSession != null) return;
+    if (_disposed || _rtcMode) return;
     if (_sessionId.isNotEmpty && offer['session'] != _sessionId) return;
     _directOffer = offer;
     if (_sessionId.isEmpty) return;
@@ -453,7 +377,7 @@ class ControllerSession {
 
   Future<void> _tryDirect(Map<String, dynamic> offer) async {
     if (_disposed ||
-        _directSession != null ||
+        _rtcMode ||
         _directSocket != null ||
         _directAttempting ||
         state.value != ControllerState.connected) {
@@ -745,7 +669,6 @@ class ControllerSession {
 
   void _onSocketClosed(String detail) {
     if (_closedByUser || _disposed) return;
-    if (_directSession != null) return;
     if (state.value == ControllerState.ended ||
         state.value == ControllerState.failed) {
       return;
@@ -754,7 +677,9 @@ class ControllerSession {
   }
 
   void _fail(String message) {
-    if (state.value == ControllerState.failed) return;
+    if (_disposed ||
+        state.value == ControllerState.failed ||
+        state.value == ControllerState.ended) return;
     error.value = message;
     state.value = ControllerState.failed;
     _teardown();
@@ -771,20 +696,19 @@ class ControllerSession {
 
   void _teardown() {
     _closeDirect(notify: false);
+    rtcRenderer.value = null;
+    final rtc = _rtc;
+    _rtc = null;
+    _rtcMode = false;
+    _rtcFirstFrame = false;
+    _sessionId = '';
+    _rtcTimeout?.cancel();
+    _rtcTimeout = null;
+    unawaited(rtc?.dispose());
     _directRetryTimer?.cancel();
     _directRetryTimer = null;
     _directOffer = null;
     _directRetries = 0;
-    final directSub = _directSessionSub;
-    _directSessionSub = null;
-    try {
-      directSub?.cancel();
-    } catch (_) {}
-    final directSocket = _directSession;
-    _directSession = null;
-    try {
-      directSocket?.close();
-    } catch (_) {}
     _pingTimer?.cancel();
     _pingTimer = null;
     _heartbeatTimer?.cancel();
@@ -802,21 +726,16 @@ class ControllerSession {
   }
 
   void _send(Map<String, dynamic> message) {
-    final direct = _directSession;
-    if (direct != null) {
-      try {
-        direct.add(jsonEncode(message));
-      } catch (_) {}
+    if (_rtcMode) {
+      _rtc?.sendInput(message);
       return;
     }
-    final channel = _channel;
-    if (channel == null) return;
-    try {
-      channel.sink.add(jsonEncode(message));
-    } catch (_) {}
+    _sendRelay(message);
   }
 
-  bool get canSendInput => state.value == ControllerState.connected;
+  bool get canSendInput =>
+      state.value == ControllerState.connected &&
+      (!_rtcMode || _rtc?.connected == true);
 
   void mouseMove(double nx, double ny) {
     if (!canSendInput) return;
@@ -900,9 +819,11 @@ class ControllerSession {
   void end({String reason = 'controller_ended'}) {
     if (_closedByUser) return;
     _closedByUser = true;
-    if (canSendInput) {
-      _send({'t': RelayMessage.sessionEnd, 'reason': reason});
-    }
+    _sendRelay({
+      't': RelayMessage.sessionEnd,
+      'session': _sessionId,
+      'reason': reason
+    });
     if (state.value != ControllerState.failed) {
       state.value = ControllerState.ended;
     }
@@ -927,6 +848,7 @@ class ControllerSession {
     peerPlatform.dispose();
     stats.dispose();
     transport.dispose();
+    rtcRenderer.dispose();
     latestFrame.dispose();
   }
 }

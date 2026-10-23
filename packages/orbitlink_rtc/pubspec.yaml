@@ -1,0 +1,12 @@
+name: orbitlink_rtc
+description: WebRTC transport shared by the OrbitLink Windows and Android clients.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_webrtc: 0.12.7

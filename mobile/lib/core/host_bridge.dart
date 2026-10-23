@@ -9,6 +9,10 @@ class HostConfig {
     required this.name,
     required this.relayUrl,
     required this.allowRemote,
+    this.stunUrl = 'stun:stun.l.google.com:19302',
+    this.turnUrl = '',
+    this.turnUsername = '',
+    this.turnCredential = '',
   });
 
   final String id;
@@ -16,6 +20,10 @@ class HostConfig {
   final String name;
   final String relayUrl;
   final bool allowRemote;
+  final String stunUrl;
+  final String turnUrl;
+  final String turnUsername;
+  final String turnCredential;
 
   factory HostConfig.fromMap(Map<dynamic, dynamic> map) => HostConfig(
         id: (map['id'] as String?) ?? '000000000',
@@ -23,6 +31,10 @@ class HostConfig {
         name: (map['name'] as String?) ?? 'Android 设备',
         relayUrl: (map['relayUrl'] as String?) ?? 'ws://10.0.2.2:7080/ws',
         allowRemote: (map['allowRemote'] as bool?) ?? true,
+        stunUrl: (map['stunUrl'] as String?) ?? 'stun:stun.l.google.com:19302',
+        turnUrl: (map['turnUrl'] as String?) ?? '',
+        turnUsername: (map['turnUsername'] as String?) ?? '',
+        turnCredential: (map['turnCredential'] as String?) ?? '',
       );
 
   Map<String, dynamic> toMap() => {
@@ -31,11 +43,19 @@ class HostConfig {
         'name': name,
         'relayUrl': relayUrl,
         'allowRemote': allowRemote,
+        'stunUrl': stunUrl,
+        'turnUrl': turnUrl,
+        'turnUsername': turnUsername,
+        'turnCredential': turnCredential,
       };
 
   HostConfig copyWith({
     String? relayUrl,
     bool? allowRemote,
+    String? stunUrl,
+    String? turnUrl,
+    String? turnUsername,
+    String? turnCredential,
   }) =>
       HostConfig(
         id: id,
@@ -43,7 +63,83 @@ class HostConfig {
         name: name,
         relayUrl: relayUrl ?? this.relayUrl,
         allowRemote: allowRemote ?? this.allowRemote,
+        stunUrl: stunUrl ?? this.stunUrl,
+        turnUrl: turnUrl ?? this.turnUrl,
+        turnUsername: turnUsername ?? this.turnUsername,
+        turnCredential: turnCredential ?? this.turnCredential,
       );
+}
+
+// Validate the original authority: Uri alone accepts empty ports and normalizes
+// malformed input. ICE URLs use scheme:host, not the HTTP scheme://host form.
+String? validateRelayUrl(String value) {
+  final url = value.trim();
+  final match =
+      RegExp(r'^wss?://([^/?#]+)(?:[/?][^#]*)?$', caseSensitive: false)
+          .firstMatch(url);
+  if (match == null ||
+      RegExp(r'[\s\x00-\x1f\x7f\\]').hasMatch(url) ||
+      RegExp(r'%(?![0-9a-fA-F]{2})').hasMatch(url) ||
+      !_isValidServerAddress(match.group(1)!) ||
+      Uri.tryParse(url) == null) {
+    return '请输入有效的 ws:// 或 wss:// 信令地址（主机及端口需有效）';
+  }
+  return null;
+}
+
+String? validateRtcSettings({
+  required String stunUrl,
+  required String turnUrl,
+  required String turnUsername,
+  required String turnCredential,
+}) {
+  if (!_isValidIceUrl(stunUrl.trim(), isTurn: false)) {
+    return 'STUN URL 无效，请使用 stun: 或 stuns: 地址，或留空关闭';
+  }
+  if (!_isValidIceUrl(turnUrl.trim(), isTurn: true)) {
+    return 'TURN URL 无效，请使用 turn: 或 turns: 地址，或留空关闭';
+  }
+  if (turnUrl.trim().isNotEmpty &&
+      (turnUsername.trim().isEmpty || turnCredential.trim().isEmpty)) {
+    return '启用 TURN 时必须填写 TURN 用户名和密码';
+  }
+  return null;
+}
+
+bool _isValidIceUrl(String value, {required bool isTurn}) {
+  if (value.isEmpty) return true;
+  final match = RegExp(
+    r'^(stun|stuns|turn|turns):([^?]+)(?:\?transport=(udp|tcp))?$',
+    caseSensitive: false,
+  ).firstMatch(value);
+  if (match == null || RegExp(r'[\s\x00-\x1f\x7f]').hasMatch(value)) {
+    return false;
+  }
+  final scheme = match.group(1)!.toLowerCase();
+  return (isTurn ? scheme.startsWith('turn') : scheme.startsWith('stun')) &&
+      _isValidServerAddress(match.group(2)!);
+}
+
+bool _isValidServerAddress(String value) {
+  final match = RegExp(
+    r'^(?:\[([0-9a-fA-F:.]+)\]|([^:\[\]/?#@\\]+))(?::([0-9]+))?$',
+  ).firstMatch(value);
+  if (match == null) return false;
+  final portText = match.group(3);
+  if (portText != null) {
+    final port = int.tryParse(portText);
+    if (port == null || port < 1 || port > 65535) return false;
+  }
+  final ipv6 = match.group(1);
+  if (ipv6 != null) {
+    return InternetAddress.tryParse(ipv6)?.type == InternetAddressType.IPv6;
+  }
+  final host = match.group(2)!;
+  if (InternetAddress.tryParse(host) != null) return true;
+  if (RegExp(r'^[0-9.]+$').hasMatch(host)) return false;
+  final domain = host.endsWith('.') ? host.substring(0, host.length - 1) : host;
+  final label = RegExp(r'^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$');
+  return domain.length <= 253 && domain.split('.').every(label.hasMatch);
 }
 
 class HostStatus {

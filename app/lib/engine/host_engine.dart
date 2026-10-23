@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:orbitlink_rtc/orbitlink_rtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/models.dart';
@@ -59,6 +60,8 @@ class HostEngine {
   Timer? _registerTimeout;
   CaptureWorker? _worker;
   final DirectVideoHost _direct = DirectVideoHost();
+  RtcHostSession? _rtcHost;
+  Timer? _rtcTimeout;
 
   String? _activeSessionId;
   String _peerName = '';
@@ -94,7 +97,7 @@ class HostEngine {
       password: identity.password,
       canAcceptSession: () => settings.allowRemote && _activeSessionId == null,
       onSessionStart: _startDirectSession,
-      onSessionMessage: _handleDirectSessionMessage,
+      onSessionMessage: _handlePeerMessage,
       onSessionEnded: _onDirectSessionClosed,
     );
     await _direct.start();
@@ -118,7 +121,9 @@ class HostEngine {
     }
     if (urlChanged || registrationChanged) {
       _restart();
-    } else if (_activeSessionId != null && _fpsOverride == null) {
+    } else if (_activeSessionId != null &&
+        _rtcHost == null &&
+        _fpsOverride == null) {
       _startCaptureLoop();
     }
   }
@@ -132,6 +137,7 @@ class HostEngine {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _noReconnect = false;
+    _stopSession(notify: true);
     await _closeChannel();
     await _connect();
   }
@@ -167,6 +173,7 @@ class HostEngine {
         'meta': {
           'platform': 'windows',
           'version': '1.0.0',
+          'rtc': true,
         },
       });
       _registerTimeout?.cancel();
@@ -282,12 +289,13 @@ class HostEngine {
         _startSession(message);
         break;
       case RelayMessage.sessionEnd:
-        _stopSession(notify: false);
+        if (message['session'] == _activeSessionId) _stopSession(notify: false);
         break;
       case RelayMessage.input:
-        _applyInput(message);
+        if (_rtcHost == null) _applyInput(message);
         break;
       case RelayMessage.clipboard:
+        if (_rtcHost != null || _activeSessionId == null) break;
         final text = message['text'] as String?;
         if (text != null) onRemoteClipboard?.call(text);
         break;
@@ -332,7 +340,10 @@ class HostEngine {
 
   Future<void> _startSession(Map<String, dynamic> message) async {
     final id = message['session'] as String? ?? '';
-    if (id.isEmpty) return;
+    if (_disposed ||
+        id.isEmpty ||
+        id != _incomingSession ||
+        id == _activeSessionId) return;
     if (_activeSessionId != null && _activeSessionId != id) {
       _stopSession(notify: false);
     }
@@ -350,7 +361,8 @@ class HostEngine {
     _restartEncoder = false;
     _directSessionActive = false;
     _directFullSession = false;
-    _setupDirect(id);
+    final useRtc = message['rtc'] == true;
+    if (!useRtc) _setupDirect(id);
     session.value = HostSessionInfo(
       sessionId: id,
       controllerName: _peerName,
@@ -358,13 +370,95 @@ class HostEngine {
       mode: _mode,
       startedAt: DateTime.now(),
     );
+    onEvent?.call('$_peerName 正在远程控制本机');
+    if (useRtc) {
+      _startRtcHost();
+      return;
+    }
     _worker ??= CaptureWorker();
     try {
       await _worker!.start();
     } catch (_) {}
     _startCaptureLoop();
     _startStats();
-    onEvent?.call('$_peerName 正在远程控制本机');
+  }
+
+  Future<void> _startRtcHost() async {
+    final id = _activeSessionId;
+    final rtc = RtcHostSession(
+      iceServers: buildIceServers(
+        stunUrl: settings.stunUrl,
+        turnUrl: settings.turnUrl,
+        turnUsername: settings.turnUsername,
+        turnCredential: settings.turnCredential,
+      ),
+      onSignal: (signal) {
+        if (_activeSessionId != id || _disposed) return;
+        _send({...signal, 't': RelayMessage.control, 'session': id});
+      },
+      onInput: (message) {
+        if (_activeSessionId == id && !_disposed) _handlePeerMessage(message);
+      },
+      onState: (state) {
+        if (_activeSessionId != id || _disposed) return;
+        if (state == 'ready') {
+          _rtcTimeout?.cancel();
+        } else if (state == 'connected' && _rtcHost?.connected == true) {
+          _rtcTimeout?.cancel();
+        } else if (state == 'disconnected') {
+          _rtcTimeout?.cancel();
+          _rtcTimeout = Timer(const Duration(seconds: 10), () {
+            if (_activeSessionId == id) endSession();
+          });
+        } else if (state == 'failed' || state == 'closed') {
+          endSession();
+        }
+      },
+    );
+    _rtcHost = rtc;
+    _rtcTimeout = Timer(const Duration(seconds: 30), () {
+      if (_rtcHost == rtc) endSession();
+    });
+    try {
+      await rtc.start();
+    } catch (_) {
+      if (_rtcHost == rtc && !_disposed) {
+        endSession();
+        onEvent?.call('无法建立远程画面连接，请重试');
+      }
+    }
+  }
+
+  Future<void> _handleRtcControl(Map<String, dynamic> message) async {
+    final rtc = _rtcHost;
+    if (rtc == null) return;
+    try {
+      switch (message['action']) {
+        case 'rtc_answer':
+        case 'rtc_candidate':
+          if (message['session'] != _activeSessionId) return;
+          await rtc.handleSignal(message);
+          break;
+        case 'quality':
+          await rtc.setVideoOptions(quality: message['mode'] as String?);
+          break;
+        case 'fps':
+          await rtc.setVideoOptions(fps: (message['value'] as num?)?.toInt());
+          break;
+        case 'ping':
+          await rtc.send({
+            't': RelayMessage.control,
+            'action': 'pong',
+            'ts': message['ts']
+          });
+          break;
+        case 'end':
+          endSession();
+          break;
+      }
+    } catch (_) {
+      if (_rtcHost == rtc && !_disposed) endSession();
+    }
   }
 
   String? _startDirectSession(String peer, String address) {
@@ -408,8 +502,8 @@ class HostEngine {
     _startStats();
   }
 
-  void _handleDirectSessionMessage(Map<String, dynamic> message) {
-    if (_activeSessionId == null || !_directFullSession) return;
+  void _handlePeerMessage(Map<String, dynamic> message) {
+    if (_activeSessionId == null) return;
     switch (message['t'] as String? ?? '') {
       case RelayMessage.input:
         _applyInput(message);
@@ -580,7 +674,7 @@ class HostEngine {
   }
 
   void _applyInput(Map<String, dynamic> message) {
-    if (_activeSessionId == null) return;
+    if (_activeSessionId == null || !settings.allowRemote) return;
     final kind = message['kind'] as String? ?? '';
     switch (kind) {
       case 'mouse':
@@ -625,6 +719,10 @@ class HostEngine {
   }
 
   void _onControl(Map<String, dynamic> message) {
+    if (_rtcHost != null) {
+      unawaited(_handleRtcControl(message));
+      return;
+    }
     final action = message['action'] as String? ?? '';
     switch (action) {
       case 'ping':
@@ -700,6 +798,11 @@ class HostEngine {
     _directSessionActive = false;
     _directFullSession = false;
     _direct.revoke();
+    final rtc = _rtcHost;
+    _rtcHost = null;
+    _rtcTimeout?.cancel();
+    _rtcTimeout = null;
+    unawaited(rtc?.dispose());
     if (wasActive && notify) onEvent?.call('远程控制已结束');
   }
 
